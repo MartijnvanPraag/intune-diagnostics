@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:eng.ms)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:microsoft.github.io)",
+      "Bash(mkdir:*)",
+      "Bash(del \"C:\\dev\\intune-diagnostics\\backend\\DiagnosticsPage.tsx\")",
+      "Bash(rm:*)",
+      "Bash(python:*)",
+      "Bash(npm install:*)",
+      "Bash(npm run dev:*)",
+      "Bash(uv sync:*)",
+      "Bash(npm run backend:dev:*)",
+      "Bash(npm run frontend:dev:*)",
+      "Read(c:\\Users\\mvanpraag\\OneDrive - Microsoft\\Desktop/**)",
+      "Bash(curl:*)",
+      "Bash(uv run:*)",
+      "Bash(npx:*)",
+      "Bash(npm view:*)",
+      "Bash(taskkill:*)",
+      "Bash(uv add:*)"
+    ],
+    "deny": []
+  }
+}

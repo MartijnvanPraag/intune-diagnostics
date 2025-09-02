@@ -1,0 +1,66 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Windows 11 styled scrollbars */
+::-webkit-scrollbar {
+  width: 12px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 8px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #a8a8a8;
+}
+
+/* Windows 11 fluent design effects */
+.win11-glass {
+  backdrop-filter: blur(20px);
+  background: rgba(243, 242, 241, 0.8);
+}
+
+.win11-acrylic {
+  backdrop-filter: blur(20px) saturate(1.8);
+  background: rgba(255, 255, 255, 0.7);
+}
+
+/* Windows 11 button styles */
+.win11-button {
+  @apply bg-win11-primary text-win11-text-inverse rounded-win11-small px-4 py-2 font-medium
+         transition-all duration-150 ease-in-out
+         hover:bg-win11-primaryHover hover:shadow-win11-small
+         focus:outline-none focus:ring-2 focus:ring-win11-accent focus:ring-offset-2
+         active:scale-[0.98];
+}
+
+.win11-button-secondary {
+  @apply bg-win11-surface text-win11-text-primary border border-win11-border rounded-win11-small px-4 py-2 font-medium
+         transition-all duration-150 ease-in-out
+         hover:bg-win11-surfaceHover hover:shadow-win11-small
+         focus:outline-none focus:ring-2 focus:ring-win11-accent focus:ring-offset-2
+         active:scale-[0.98];
+}
+
+/* Windows 11 card styles */
+.win11-card {
+  @apply bg-win11-card rounded-win11 shadow-win11 border border-win11-border
+         transition-all duration-200 ease-in-out
+         hover:shadow-win11-large hover:border-win11-accent/30;
+}
+
+/* Windows 11 input styles */
+.win11-input {
+  @apply bg-win11-background border border-win11-border rounded-win11-small px-3 py-2
+         text-win11-text-primary placeholder-win11-text-tertiary
+         transition-all duration-150 ease-in-out
+         focus:outline-none focus:ring-2 focus:ring-win11-accent focus:border-transparent
+         hover:border-win11-accent/50;
+}

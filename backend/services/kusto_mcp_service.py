@@ -1,0 +1,299 @@
+import asyncio
+import json
+import os
+import sys
+import subprocess
+import time
+import logging
+import re
+from typing import Dict, Any, List, Optional, Iterable
+from mcp.client.session import ClientSession
+from mcp.client.stdio import stdio_client, StdioServerParameters
+from mcp import types
+from contextlib import AsyncExitStack
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+MCP_PACKAGE = "@mcp-apps/kusto-mcp-server"
+
+READONLY_BLOCK_PREFIXES = {".drop", ".alter", ".ingest", ".delete", ".set", ".create", ".append"}
+
+class KustoMCPService:
+    """Kusto MCP service using the official MCP Python SDK"""
+
+    def __init__(self):
+        self._session: Optional[ClientSession] = None
+        # Manage async resources (stdio_client context) cleanly
+        self._exit_stack: Optional[AsyncExitStack] = None
+        self.is_initialized = False
+        self._init_lock = asyncio.Lock()
+        self._tool_names: List[str] = []  # cache of server tools
+        # Config (can be overridden via env vars)
+        self.cluster_url = os.getenv("KUSTO_CLUSTER_URL")
+        self.database = os.getenv("KUSTO_DATABASE")
+
+    async def initialize(self):
+        # Ensure only one initializer runs
+        async with self._init_lock:
+            if self.is_initialized:
+                return
+
+            logger.info("Starting Kusto MCP server with official MCP SDK (with ClientSession context)...")
+
+            try:
+                base_cmd = "npx.cmd" if sys.platform.startswith("win") else "npx"
+                args = ["-y", MCP_PACKAGE]
+                init_timeout = int(os.getenv("MCP_INIT_TIMEOUT", "60"))
+                logger.info(f"Spawning MCP server via stdio_client (timeout={init_timeout}s): {base_cmd} {' '.join(args)}")
+
+                self._exit_stack = AsyncExitStack()
+                server_params = StdioServerParameters(command=base_cmd, args=args)
+                read_stream, write_stream = await self._exit_stack.enter_async_context(stdio_client(server=server_params))
+                logger.info("Acquired stdio streams from MCP server")
+
+                # IMPORTANT: Enter ClientSession as async context so background tasks start
+                self._session = await self._exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
+
+                logger.info(f"Initializing MCP protocol (timeout={init_timeout}s)...")
+                try:
+                    start = time.monotonic()
+                    await asyncio.wait_for(self._session.initialize(), timeout=init_timeout)
+                    elapsed = time.monotonic() - start
+                    logger.info(f"MCP initialize completed in {elapsed:.2f}s")
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "MCP session initialize timed out – verify the server implements the MCP handshake and increase MCP_INIT_TIMEOUT if needed."
+                    )
+                    raise
+
+                # Tool discovery
+                try:
+                    tool_list = await self._session.list_tools()
+                    self._tool_names = [t.name for t in getattr(tool_list, "tools", [])]
+                    logger.info(f"Discovered tools: {', '.join(self._tool_names) or '[none]'}")
+                except Exception as tool_err:
+                    logger.warning(f"Failed to list tools post-initialize: {tool_err}")
+
+                self.is_initialized = True
+                logger.info("Kusto MCP server initialized successfully (session active)")
+            except Exception as e:
+                logger.error(f"Failed to initialize MCP service: {e}")
+                await self.cleanup()
+                raise RuntimeError(f"MCP initialization failed: {e}")
+
+    async def execute_kusto_query(self, query: str, parameters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Execute a Kusto query via MCP"""
+        if not query or not query.strip():
+            return {"success": False, "error": "Empty query"}
+        if any(query.strip().lower().startswith(p) for p in READONLY_BLOCK_PREFIXES):
+            return {"success": False, "error": "Write/DDL command blocked"}
+        
+        if not self.is_initialized:
+            await self.initialize()
+        
+        if not self._session:
+            return {"success": False, "error": "MCP session not initialized"}
+        
+        # Ensure mandatory parameters for server tool
+        # Allow explicit override, else attempt to parse from query so env vars aren't required
+        cluster_url = (parameters or {}).get("clusterUrl") or self.cluster_url
+        database = (parameters or {}).get("database") or self.database
+
+        if not cluster_url or not database:
+            # Try to extract first cluster("...").database("...") pattern from query
+            pattern = r"cluster\([\"']([^\"']+)[\"']\)\.database\([\"']([^\"']+)[\"']\)"
+            m = re.search(pattern, query)
+            if m:
+                cluster_url = cluster_url or m.group(1)
+                database = database or m.group(2)
+                logger.info(f"Parsed cluster/database from query: {cluster_url} / {database}")
+
+        if not cluster_url or not database:
+            return {"success": False, "error": "Unable to determine clusterUrl/database. Provide parameters or include cluster(\"...\").database(\"...\") in the query."}
+
+        # Normalize cluster URL (azure-kusto-data requires full https scheme)
+        if not re.match(r"^https?://", cluster_url, re.IGNORECASE):
+            normalized = f"https://{cluster_url.strip()}".rstrip('/')
+            logger.info(f"Normalizing cluster URL '{cluster_url}' -> '{normalized}'")
+            cluster_url = normalized
+
+        # Determine execute tool name (server uses snake_case; README shows camelCase)
+        execute_tool_candidates = ["execute_query", "executeQuery"]
+        # If we already know tool names, filter to those present
+        if self._tool_names:
+            execute_tool_candidates = [n for n in execute_tool_candidates if n in self._tool_names] or execute_tool_candidates
+
+        last_error: Optional[str] = None
+        for tool_name in execute_tool_candidates:
+            try:
+                logger.info(f"Calling MCP tool '{tool_name}'")
+                result = await self._session.call_tool(
+                    tool_name,
+                    {"clusterUrl": cluster_url, "database": database, "query": query, **(parameters or {})}
+                )
+                return self._normalize_tool_result(result)
+            except Exception as e:  # noqa: BLE001
+                last_error = str(e)
+                logger.warning(f"Tool '{tool_name}' failed: {e}")
+        return {"success": False, "error": last_error or "Unknown MCP tool invocation failure"}
+
+
+    def _normalize_tool_result(self, result) -> Dict[str, Any]:
+        """Normalize MCP tool result to our expected format"""
+        try:
+            # The server currently sends text content like:
+            #  "Query results: {json}"
+            #  or errors starting with "Error ..."
+            if hasattr(result, 'content') and result.content:
+                # Aggregate all text parts
+                texts: List[str] = []
+                for item in result.content:  # type: ignore[attr-defined]
+                    text_val = getattr(item, 'text', None)
+                    if text_val:
+                        texts.append(text_val)
+                combined = "\n".join(texts)
+                if not combined:
+                    return {"success": True, "table": {"columns": ["Content"], "rows": [[str(result.content[0])]], "total_rows": 1}}
+
+                # Extract JSON after prefix if present
+                if combined.startswith("Query results:"):
+                    json_part = combined.split(":", 1)[1].strip()
+                    try:
+                        data = json.loads(json_part)
+                        # If data has primaryResults shape from kustoService executeQuery -> may include data property
+                        if isinstance(data, dict):
+                            # Try to locate rows
+                            rows = data.get('data') or data.get('rows') or data.get('table') or data
+                            if isinstance(rows, list):
+                                # Derive columns from first row keys
+                                if rows and isinstance(rows[0], dict):
+                                    columns = list(rows[0].keys())
+                                    # Convert dict rows to list-of-values
+                                    row_list = [[r.get(c) for c in columns] for r in rows]
+                                else:
+                                    columns = ["Value"]
+                                    row_list = [[r] for r in rows]
+                                return {"success": True, "table": {"columns": columns, "rows": row_list, "total_rows": len(row_list)}}
+                    except json.JSONDecodeError:
+                        pass  # fall back to raw text
+
+                # Return raw text if not parseable JSON
+                return {"success": True, "table": {"columns": ["Result"], "rows": [[combined]], "total_rows": 1}}
+
+            return {"success": True, "table": {"columns": ["Data"], "rows": [[str(result)]], "total_rows": 1}}
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Failed to normalize tool result: {e}")
+            return {"success": False, "error": f"Failed to process result: {e}"}
+    
+    # Helper KQL templates (still routed through MCP executeQuery tool)
+    
+    async def get_device_details(self, device_id: str) -> Dict[str, Any]:
+        """Get device details using the predefined query from instructions.md"""
+        # Try US region first
+        us_query = f"""
+        cluster("qrybkradxus01pe.westus2.kusto.windows.net").database("qrybkradxglobaldb").Device_Snapshot()
+        | where DeviceId == "{device_id}"
+        """
+        
+        result = await self.execute_kusto_query(us_query)
+        
+        # If US region fails or returns no data, try EU region
+        if not result.get("success") or not result.get("table", {}).get("rows"):
+            eu_query = f"""
+            cluster("qrybkradxeu01pe.northeurope.kusto.windows.net").database("qrybkradxglobaldb").Device_Snapshot()
+            | where DeviceId == "{device_id}"
+            """
+            result = await self.execute_kusto_query(eu_query)
+        
+        return result
+    
+    async def get_compliance_status(self, device_id: str) -> Dict[str, Any]:
+        """Get compliance status for the last 10 days"""
+        query = f"""
+        cluster("intune.kusto.windows.net").database("intune").DeviceComplianceStatusChangesByDeviceId('{device_id}', ago(10d), now(), 1000)
+        """
+        
+        return await self.execute_kusto_query(query)
+    
+    async def get_policy_status(self, context_id: str, device_id: str) -> Dict[str, Any]:
+        """Get policy settings status for device"""
+        query = f"""
+        GetAllPolicySettingsStatusForTenant(@'{context_id}')
+        | where DeviceId == "{device_id}"
+        """
+        
+        return await self.execute_kusto_query(query)
+    
+    async def get_user_lookup(self, device_id: str) -> Dict[str, Any]:
+        """Get user IDs associated with device"""
+        query = f"""
+        cluster("intune.kusto.windows.net").database("intune").IntuneEvent
+        | where DeviceId == "{device_id}"
+        | project UserId
+        | distinct UserId
+        """
+        
+        return await self.execute_kusto_query(query)
+    
+    async def get_tenant_info(self, account_id: str) -> Dict[str, Any]:
+        """Get tenant information"""
+        query = f"""
+        cluster("intune.kusto.windows.net").database("intune").WindowsAutopilot_GetTenantInformationFromEitherAccountIdContextIdOrName("{account_id}")
+        """
+        
+        return await self.execute_kusto_query(query)
+    
+    async def get_effective_groups(self, account_id: str, device_id: str) -> Dict[str, Any]:
+        """Get effective group memberships"""
+        query = f"""
+        union 
+        	cluster("qrybkradxus01pe.westus2.kusto.windows.net").database("qrybkradxglobaldb").EffectiveGroupMembershipV2_Snapshot(),
+        	cluster("qrybkradxeu01pe.northeurope.kusto.windows.net").database("qrybkradxglobaldb").EffectiveGroupMembershipV2_Snapshot()
+        | where AccountId == "{account_id}"
+        | where TargetId == "{device_id}"
+        """
+        
+        return await self.execute_kusto_query(query)
+    
+    async def get_applications(self, context_id: str, device_id: str) -> Dict[str, Any]:
+        """Get application status"""
+        query = f"""
+        GetAllAppStatusForTenant('{context_id}')
+        | where DeviceId == "{device_id}"
+        """
+        
+        return await self.execute_kusto_query(query)
+    
+    async def get_mam_policy(self, context_id: str, device_id: str) -> Dict[str, Any]:
+        """Get MAM policy status"""
+        query = f"""
+        cluster("intune.kusto.windows.net").database("intune").GetAllMAMPolicyStatusForTenant("{context_id}")
+        | where DeviceId == "{device_id}"
+        """
+        
+        return await self.execute_kusto_query(query)
+    
+    async def cleanup(self):
+        """Clean up resources"""
+        # Close any managed async contexts
+        if self._exit_stack:
+            try:
+                await self._exit_stack.aclose()
+            except Exception as e:
+                logger.error(f"Error closing MCP stdio context: {e}")
+
+        self._exit_stack = None
+        self._session = None
+        self.is_initialized = False
+# Global MCP service instance
+kusto_mcp_service: Optional[KustoMCPService] = None
+
+async def get_kusto_service() -> KustoMCPService:
+    """Get or create the global Kusto MCP service instance"""
+    global kusto_mcp_service
+    if kusto_mcp_service is None:
+        kusto_mcp_service = KustoMCPService()
+        await kusto_mcp_service.initialize()
+    return kusto_mcp_service
