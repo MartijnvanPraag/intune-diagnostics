@@ -161,7 +161,8 @@ async def chat_with_agent(
     await db.refresh(user_msg)
 
     chat_result = await svc.chat(request.message, request.parameters or {})
-    summary = chat_result.get("summary") or chat_result.get("message") or "OK"
+    # Prefer explicit agent natural language response, fall back to earlier message or generic OK
+    summary = chat_result.get("response") or chat_result.get("summary") or chat_result.get("message") or "OK"
 
     # Persist agent message
     agent_msg = ChatMessage(
@@ -254,14 +255,22 @@ async def execute_diagnostic_query(
             diagnostic_session.status = "completed"  # type: ignore[assignment]
             await db.commit()
             
-            # Extract table data if available
+            # Extract all tables if available
             table_data = None
-            if "tables" in result_data and result_data["tables"]:
-                table_data = result_data["tables"][0]  # First table for now
-            
+            tables_list = None
+            if isinstance(result_data.get("tables"), list) and result_data["tables"]:
+                raw_tables = result_data["tables"]
+                tables_list = []
+                for t in raw_tables:
+                    if isinstance(t, dict) and 'columns' in t and 'rows' in t:
+                        tables_list.append(t)
+                if tables_list:
+                    table_data = tables_list[0]
+
             return AgentResponse(
                 response=result_data.get("summary", "Query executed successfully"),
                 table_data=table_data,
+                tables=tables_list,
                 session_id=session_id
             )
         

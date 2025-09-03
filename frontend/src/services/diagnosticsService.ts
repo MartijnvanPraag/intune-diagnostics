@@ -23,6 +23,7 @@ export interface TableData {
 export interface AgentResponse {
   response: string
   table_data?: TableData
+  tables?: TableData[]
   session_id: string
 }
 
@@ -73,7 +74,8 @@ export interface ChatMessageRecord {
   role: string
   content: string
   params?: Record<string, any>
-  tables?: any
+  // Backend returns list[dict] for agent messages (each with columns, rows, total_rows)
+  tables?: Array<{ columns: string[]; rows: any[][]; total_rows?: number }>
   intent?: string
   clarification_needed: boolean
   created_at?: string

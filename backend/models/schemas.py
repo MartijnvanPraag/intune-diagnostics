@@ -79,5 +79,6 @@ class TableData(BaseModel):
 
 class AgentResponse(BaseModel):
     response: str
-    table_data: Optional[TableData] = None
+    table_data: Optional[TableData] = None  # First / primary table (backward compatibility)
+    tables: Optional[List[TableData]] = None  # All tables if multiple
     session_id: str

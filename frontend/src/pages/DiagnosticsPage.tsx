@@ -86,8 +86,9 @@ const DiagnosticsPage: React.FC = () => {
       await loadRecentSessions()
       toast.success('Query executed successfully!')
     } catch (error) {
-      console.error('Query failed:', error)
-      toast.error(`Failed to execute diagnostic query: ${error.response?.data?.detail || error.message}`)
+      const err: any = error
+      console.error('Query failed:', err)
+      toast.error(`Failed to execute diagnostic query: ${err?.response?.data?.detail || err?.message}`)
     } finally {
       setLoading(false)
     }
@@ -243,7 +244,13 @@ const DiagnosticsPage: React.FC = () => {
                     Query Results
                   </h3>
                   
-                  {result.table_data ? (
+                  {result.tables && result.tables.length > 0 ? (
+                    <div className="space-y-6">
+                      {result.tables.map((t, i) => (
+                        <DataTable key={i} data={t} title={i === 0 ? undefined : `Table ${i+1}`} />
+                      ))}
+                    </div>
+                  ) : result.table_data ? (
                     <DataTable data={result.table_data} />
                   ) : (
                     <div className="win11-card p-4">
@@ -330,8 +337,9 @@ const DiagnosticsPage: React.FC = () => {
                             setSelectedSessions(new Set())
                             toast.success('All sessions deleted successfully')
                           } catch (error) {
-                            console.error('Delete all sessions error:', error)
-                            toast.error(`Failed to delete all sessions: ${error.response?.data?.detail || error.message}`)
+                            const err: any = error
+                            console.error('Delete all sessions error:', err)
+                            toast.error(`Failed to delete all sessions: ${err?.response?.data?.detail || err?.message}`)
                           }
                         }
                       }}
@@ -368,6 +376,25 @@ const DiagnosticsPage: React.FC = () => {
                           <span className="text-sm font-medium text-win11-text-primary">
                             {queryTypes.find(qt => qt.id === session.query_type)?.name || session.query_type}
                           </span>
+                          <button
+                            onClick={()=>{
+                              // Populate result viewer with stored tables / summary if present
+                              if (session.results) {
+                                const anyRes: any = session.results
+                                const tables = anyRes?.tables || []
+                                setResult({
+                                  response: anyRes?.summary || anyRes?.response || 'Session loaded',
+                                  table_data: tables && tables.length>0 ? tables[0] : undefined,
+                                  tables: tables,
+                                  session_id: session.session_id,
+                                })
+                              } else {
+                                setResult(null)
+                              }
+                            }}
+                            className="px-2 py-1 text-[10px] border border-win11-border rounded hover:bg-win11-surfaceHover"
+                            title="Load this session's results"
+                          >View</button>
                         </div>
                         
                         <div className="flex items-center space-x-2">
@@ -391,8 +418,9 @@ const DiagnosticsPage: React.FC = () => {
                                   })
                                   toast.success('Session deleted successfully')
                                 } catch (error) {
-                                  console.error('Delete session error:', error)
-                                  toast.error(`Failed to delete session: ${error.response?.data?.detail || error.message}`)
+                                  const err: any = error
+                                  console.error('Delete session error:', err)
+                                  toast.error(`Failed to delete session: ${err?.response?.data?.detail || err?.message}`)
                                 }
                               }
                             }}
@@ -441,8 +469,9 @@ const DiagnosticsPage: React.FC = () => {
                               setShowDeleteConfirm(false)
                               toast.success(`${selectedSessions.size} session${selectedSessions.size > 1 ? 's' : ''} deleted successfully`)
                             } catch (error) {
-                              console.error('Delete bulk sessions error:', error)
-                              toast.error(`Failed to delete selected sessions: ${error.response?.data?.detail || error.message}`)
+                              const err: any = error
+                              console.error('Delete bulk sessions error:', err)
+                              toast.error(`Failed to delete selected sessions: ${err?.response?.data?.detail || err?.message}`)
                             }
                           }}
                           className="win11-button bg-red-600 hover:bg-red-700 text-white px-4 py-2"

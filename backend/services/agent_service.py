@@ -406,13 +406,67 @@ class AgentService:
                 if hasattr(team_result, 'messages') and team_result.messages:
                     last_message = team_result.messages[-1]
                     response_content = getattr(last_message, 'content', str(last_message))
-                    
+                    # Parse any table JSON payloads from all messages (reuse logic from chat())
+                    tables: list[dict[str, Any]] = []
+                    for m in team_result.messages:  # type: ignore[attr-defined]
+                        text = getattr(m, 'content', '') or ''
+                        if not isinstance(text, str):
+                            continue
+                        candidates: list[str] = []
+                        for match in re.finditer(r'\{', text):
+                            snippet = text[match.start():]
+                            cutoff = re.search(r'\n\n', snippet)
+                            if cutoff:
+                                snippet = snippet[:cutoff.start()]
+                            candidates.append(snippet.strip())
+                        if text.strip().startswith('{'):
+                            candidates.append(text.strip())
+                        for cand in candidates:
+                            if cand.count('{') != cand.count('}'):
+                                continue
+                            try:
+                                obj = json.loads(cand)
+                            except Exception:
+                                continue
+                            if isinstance(obj, dict):
+                                if 'table' in obj and isinstance(obj['table'], dict):
+                                    tbl = obj['table']
+                                    if all(k in tbl for k in ('columns', 'rows')):
+                                        tables.append({
+                                            'columns': tbl.get('columns', []),
+                                            'rows': tbl.get('rows', []),
+                                            'total_rows': tbl.get('total_rows', len(tbl.get('rows', [])))
+                                        })
+                                if 'columns' in obj and 'rows' in obj and isinstance(obj.get('columns'), list):
+                                    tables.append({
+                                        'columns': obj.get('columns', []),
+                                        'rows': obj.get('rows', []),
+                                        'total_rows': obj.get('total_rows', len(obj.get('rows', [])))
+                                    })
+                            elif isinstance(obj, list):
+                                for entry in obj:
+                                    if isinstance(entry, dict) and 'columns' in entry and 'rows' in entry:
+                                        tables.append({
+                                            'columns': entry.get('columns', []),
+                                            'rows': entry.get('rows', []),
+                                            'total_rows': entry.get('total_rows', len(entry.get('rows', [])))
+                                        })
+                    # De-duplicate
+                    seen: set[str] = set()
+                    unique_tables: list[dict[str, Any]] = []
+                    for t in tables:
+                        sig = f"{tuple(t.get('columns', []))}:{len(t.get('rows', []))}"
+                        if sig not in seen:
+                            seen.add(sig)
+                            unique_tables.append(t)
+
                     return {
                         "query_type": query_type,
                         "parameters": parameters,
                         "response": response_content,
                         "team_execution": True,
-                        "summary": f"Executed {query_type} query via Magentic One team"
+                        "summary": response_content or f"Executed {query_type} query via Magentic One team",
+                        "tables": unique_tables if unique_tables else None,
                     }
                 else:
                     raise Exception("No response from Magentic One team")
@@ -464,12 +518,76 @@ class AgentService:
             if hasattr(team_result, 'messages') and team_result.messages:
                 last_message = team_result.messages[-1]
                 response_content = getattr(last_message, 'content', str(last_message))
-                
+                # Attempt to extract any JSON table payloads that the IntuneExpert agent may have
+                # emitted earlier in the conversation (tools responses). We scan all messages for
+                # JSON objects containing a top-level 'table' key or a 'columns' + 'rows' pattern.
+                tables: list[dict[str, Any]] = []
+                for m in team_result.messages:  # type: ignore[attr-defined]
+                    text = getattr(m, 'content', '') or ''
+                    if not isinstance(text, str):
+                        continue
+                    # A message may contain multiple JSON objects concatenated. Split on newlines
+                    # and braces heuristically; then attempt json.loads on candidates.
+                    candidates: list[str] = []
+                    # Quick heuristic: find occurrences of '{' that might start JSON objects.
+                    for match in re.finditer(r'\{', text):
+                        snippet = text[match.start():]
+                        # Truncate at two consecutive newlines or end to keep size manageable
+                        cutoff = re.search(r'\n\n', snippet)
+                        if cutoff:
+                            snippet = snippet[:cutoff.start()]
+                        candidates.append(snippet.strip())
+                    # Also consider whole text if it looks like JSON
+                    if text.strip().startswith('{'):
+                        candidates.append(text.strip())
+                    for cand in candidates:
+                        # Balance braces quickly; skip obviously incomplete strings
+                        if cand.count('{') != cand.count('}'):
+                            continue
+                        try:
+                            obj = json.loads(cand)
+                        except Exception:
+                            continue
+                        # Normalize single table vs list
+                        if isinstance(obj, dict):
+                            if 'table' in obj and isinstance(obj['table'], dict):
+                                tbl = obj['table']
+                                if all(k in tbl for k in ('columns', 'rows')):
+                                    tables.append({
+                                        'columns': tbl.get('columns', []),
+                                        'rows': tbl.get('rows', []),
+                                        'total_rows': tbl.get('total_rows', len(tbl.get('rows', [])))
+                                    })
+                            # Some tools may return already as {'columns': [...], 'rows': [...]} directly
+                            if 'columns' in obj and 'rows' in obj and isinstance(obj.get('columns'), list):
+                                tables.append({
+                                    'columns': obj.get('columns', []),
+                                    'rows': obj.get('rows', []),
+                                    'total_rows': obj.get('total_rows', len(obj.get('rows', [])))
+                                })
+                        elif isinstance(obj, list):
+                            # List of table-like dicts
+                            for entry in obj:
+                                if isinstance(entry, dict) and 'columns' in entry and 'rows' in entry:
+                                    tables.append({
+                                        'columns': entry.get('columns', []),
+                                        'rows': entry.get('rows', []),
+                                        'total_rows': entry.get('total_rows', len(entry.get('rows', [])))
+                                    })
+                # De-duplicate tables (by columns+row count signature)
+                seen: set[str] = set()
+                unique_tables: list[dict[str, Any]] = []
+                for t in tables:
+                    sig = f"{tuple(t.get('columns', []))}:{len(t.get('rows', []))}"
+                    if sig not in seen:
+                        seen.add(sig)
+                        unique_tables.append(t)
                 return {
                     "message": message,
                     "response": response_content,
                     "team_result": "success",
-                    "agent_used": "MagenticOneTeam"
+                    "agent_used": "MagenticOneTeam",
+                    "tables": unique_tables if unique_tables else None,
                 }
             else:
                 # Fallback to simple intent detection if team doesn't return expected results
