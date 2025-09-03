@@ -14,7 +14,7 @@ dependencies = [
     "pydantic>=2.5.0",
     "azure-identity>=1.15.0",
     "autogen-agentchat>=0.4.0",
-    "autogen-ext[openai,azure]>=0.4.0",
+    "autogen-ext[azure,openai]>=0.4.0",
     "python-multipart>=0.0.6",
     "python-jose[cryptography]>=3.3.0",
     "passlib[bcrypt]>=1.7.4",
@@ -22,6 +22,7 @@ dependencies = [
     "httpx>=0.25.0",
     "python-dotenv>=1.0.0",
     "mcp>=1.13.1",
+    "autogen-magentic-one>=0.0.1",
 ]
 
 [project.optional-dependencies]

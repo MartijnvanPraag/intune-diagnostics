@@ -68,3 +68,4 @@ Thumbs.db
 # Logs
 logs/
 *.log
+.mypy_cache/3.11/__future__.data.json

@@ -125,6 +125,15 @@ openai = [
 ]
 
 [[package]]
+name = "autogen-magentic-one"
+version = "0.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b3/d6/babf0362a86b5b037a0aad43fbfe2759e8b1070ecc6d530b99cda17802f2/autogen_magentic_one-0.0.1.tar.gz", hash = "sha256:8bae29ffe47420c357bb69b318a271d1044aaeb2bf085a58c73f9cbfbdfc444d", size = 2363, upload-time = "2024-10-01T21:43:22.31Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/37/16/04cf789014b10272a278014d64c36a36b0fa7572ac11a0bafc1ac7a9fb6a/autogen_magentic_one-0.0.1-py3-none-any.whl", hash = "sha256:2f4ce8c64255d3f3ce324f327d3f251cf0518069c25ff06c86e28780e8ceba48", size = 3998, upload-time = "2024-10-01T21:43:20.883Z" },
+]
+
+[[package]]
 name = "azure-ai-agents"
 version = "1.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -680,6 +689,7 @@ dependencies = [
     { name = "alembic" },
     { name = "autogen-agentchat" },
     { name = "autogen-ext", extra = ["azure", "openai"] },
+    { name = "autogen-magentic-one" },
     { name = "azure-identity" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -718,6 +728,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.12.0" },
     { name = "autogen-agentchat", specifier = ">=0.4.0" },
     { name = "autogen-ext", extras = ["openai", "azure"], specifier = ">=0.4.0" },
+    { name = "autogen-magentic-one", specifier = ">=0.0.1" },
     { name = "azure-identity", specifier = ">=1.15.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.9.0" },
     { name = "fastapi", specifier = ">=0.104.0" },

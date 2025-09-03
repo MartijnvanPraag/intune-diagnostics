@@ -19,7 +19,9 @@
       "Bash(npx:*)",
       "Bash(npm view:*)",
       "Bash(taskkill:*)",
-      "Bash(uv add:*)"
+      "Bash(uv add:*)",
+      "Bash(pip show:*)",
+      "Bash(uv pip:*)"
     ],
     "deny": []
   }
