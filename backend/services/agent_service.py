@@ -297,6 +297,14 @@ class AgentService:
         3. Provide concise summaries after tables highlighting key findings
         4. Follow all formatting requirements from instructions.md
         5. If multiple datasets needed, show multiple labeled tables
+
+    STRICT BEHAVIOR RULES (GLOBAL):
+    - DO NOT speculate about group memberships, policies, or statuses not explicitly present in returned query/table data.
+    - If user asks for data you have not fetched yet, either (a) run ONLY the minimal specific query from instructions.md, or (b) ask for required identifiers you lack.
+    - Never invent likely or probable groups; only list groups surfaced by queries. If resolution of IDs fails, report the failure and request guidance.
+    - If previous attempts produced HTTP errors, summarize the error and await user direction instead of guessing.
+    - Keep answers tightly scoped to the user request; avoid expanding into unrelated diagnostics.
+    - If context is ambiguous (missing device/account/context IDs), ask a concise clarifying question instead of assuming.
         
         EXAMPLE INTERACTIONS:
         - "Show me device details for abc-123" -> Find device details query in instructions.md and execute it
@@ -318,6 +326,35 @@ class AgentService:
         logger.info("IntuneExpert agent created successfully with Kusto tools")
         
         return agent
+
+    # --- Post-processing helpers -------------------------------------------------
+    def _apply_speculation_filter(self, text: str, tables: list[dict[str, Any]] | None, strict: bool) -> str:
+        """In strict mode, remove or flag speculative phrases if unsupported by data.
+
+        We avoid deep heuristics: simply detect key speculative tokens and either
+        (a) remove the sentence if no tables present, or (b) append a note.
+        """
+        if not strict or not text:
+            return text
+        speculative_markers = ["likely", "probably", "possible", "might", "inferred", "it is probable"]
+        has_data = bool(tables)
+        # Split into simple lines (keep formatting minimal)
+        lines = text.split('\n')
+        cleaned: list[str] = []
+        for line in lines:
+            lower = line.lower()
+            if any(tok in lower for tok in speculative_markers):
+                if not has_data:
+                    # Drop speculative line entirely
+                    continue
+                else:
+                    # Keep but annotate
+                    line += "  (Speculative wording trimmed under strict mode; verify with actual query results.)"
+            cleaned.append(line)
+        result = '\n'.join(cleaned).strip()
+        if not result:
+            return "(Strict mode removed speculative content; no factual data returned. Provide a clarifying instruction or run a specific query.)"
+        return result
 
     
     async def setup_agent(self, model_config: ModelConfiguration) -> bool:
@@ -510,9 +547,57 @@ class AgentService:
         
         try:
             logger.info(f"Processing chat message through Magentic One team: {message[:100]}...")
-            
-            # Use the Magentic One team to process the request
-            team_result = await self.magentic_one_team.run(task=message)
+
+            # Incorporate prior conversation history (if provided) to give model natural continuity
+            history = []
+            if extra_parameters and isinstance(extra_parameters.get("conversation_history"), list):
+                raw_hist = extra_parameters.get("conversation_history")  # type: ignore[assignment]
+                # Expect list of {role, content}
+                for h in raw_hist:  # type: ignore[assignment]
+                    if not isinstance(h, dict):
+                        continue
+                    role = h.get("role")
+                    content = h.get("content")
+                    if not (isinstance(role, str) and isinstance(content, str)):
+                        continue
+                    # Truncate very long historical entries to avoid context bloat
+                    if len(content) > 4000:
+                        content = content[:4000] + "... [truncated]"
+                    history.append({"role": role, "content": content})
+
+            strict_mode = bool(extra_parameters.get("strict_mode")) if extra_parameters else False
+
+            if history:
+                # Build a consolidated task including condensed prior turns. We avoid heuristics; we just replay prior turns verbatim.
+                history_lines = []
+                for turn in history:
+                    role_tag = "USER" if turn["role"] == "user" else "ASSISTANT"
+                    history_lines.append(f"{role_tag}: {turn['content']}")
+                guardrail = """
+STRICT RESPONSE CONSTRAINTS (if any data not already retrieved DO NOT invent it):
+- Do NOT speculate about memberships, policies, or group names if they have not been explicitly retrieved via a successful query/table.
+- If the user requests something requiring additional lookup, respond with a concise clarification request or perform ONLY the minimal exact query needed (from instructions.md) to obtain it.
+- Never list 'likely' or 'probable' groups; only report factual rows from returned tables.
+- If prior attempts produced errors (HTTP 400 etc.), summarize the failure and ask for next instruction instead of guessing.
+""" if strict_mode else ""
+                composite_task = (
+                    ("The following is the prior conversation (most recent last). Use it to maintain context such as referenced device IDs or other identifiers.\n" + "\n".join(history_lines) + "\n\n")
+                    + (guardrail)
+                    + "New USER message: " + message + "\nRespond taking earlier context into account."
+                )
+            else:
+                if strict_mode:
+                    composite_task = (
+                        "STRICT RESPONSE MODE:\n" 
+                        "- Only answer using factual data already retrieved or newly queried via allowed instructions.\n"
+                        "- Do not speculate or infer. If data missing, ask a clarifying question or state required query.\n\n"
+                        f"User message: {message}"
+                    )
+                else:
+                    composite_task = message
+
+            # Use the Magentic One team to process the request with contextual composite task
+            team_result = await self.magentic_one_team.run(task=composite_task)
             
             # Extract the response from the team result
             if hasattr(team_result, 'messages') and team_result.messages:
@@ -584,10 +669,12 @@ class AgentService:
                         unique_tables.append(t)
                 return {
                     "message": message,
-                    "response": response_content,
+                    "response": self._apply_speculation_filter(response_content, unique_tables if unique_tables else None, strict_mode),
                     "team_result": "success",
                     "agent_used": "MagenticOneTeam",
                     "tables": unique_tables if unique_tables else None,
+                    # Echo back limited history length & strict flag used so caller can debug continuity
+                    "state": {"history_turns": len(history), "strict": strict_mode} if (history or strict_mode) else None,
                 }
             else:
                 # Fallback to simple intent detection if team doesn't return expected results

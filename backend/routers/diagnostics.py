@@ -20,6 +20,7 @@ class ChatRequest(BaseModel):
     message: str
     parameters: Optional[dict] = None
     session_id: Optional[str] = None
+    strict: Optional[bool] = False
 
 class ChatResponse(BaseModel):
     response: str
@@ -160,7 +161,27 @@ async def chat_with_agent(
     await db.commit()
     await db.refresh(user_msg)
 
-    chat_result = await svc.chat(request.message, request.parameters or {})
+    # Assemble minimal conversation history (last N prior turns) for natural continuity
+    history_res = await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.chat_session_id == session_obj.id)  # type: ignore[attr-defined]
+        .order_by(ChatMessage.created_at.asc())
+    )
+    prior_msgs = history_res.scalars().all()
+    # Exclude the just-persisted current user message when passing history (model will see it separately in composite)
+    history_payload = []
+    for m in prior_msgs[:-1]:
+        history_payload.append({"role": getattr(m, "role"), "content": getattr(m, "content")})
+    # Limit to last 12 turns (configurable) to control token growth
+    if len(history_payload) > 12:
+        history_payload = history_payload[-12:]
+
+    enriched_params = dict(request.parameters or {})
+    if request.strict:
+        enriched_params["strict_mode"] = True
+    enriched_params["conversation_history"] = history_payload
+
+    chat_result = await svc.chat(request.message, enriched_params)
     # Prefer explicit agent natural language response, fall back to earlier message or generic OK
     summary = chat_result.get("response") or chat_result.get("summary") or chat_result.get("message") or "OK"
 

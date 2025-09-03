@@ -48,6 +48,7 @@ export interface ChatRequest {
   message: string
   parameters?: Record<string, any>
   session_id?: string
+  strict?: boolean
 }
 
 export interface ChatResponse {

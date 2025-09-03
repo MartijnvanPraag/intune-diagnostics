@@ -19,6 +19,9 @@ const ChatPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null)
   const [sessionId, setSessionId] = useState<string | undefined>(undefined)
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([])
+  const [strictMode, setStrictMode] = useState<boolean>(() => {
+    try { return localStorage.getItem('chat.strictMode') === 'true' } catch { return false }
+  })
 
   const loadSessions = async () => {
     if (!user) return
@@ -40,7 +43,7 @@ const ChatPage: React.FC = () => {
     setInput('')
     setLoading(true)
     try {
-  const resp = await diagnosticsService.chat({ message: toSend, session_id: sessionId }, user.id)
+      const resp = await diagnosticsService.chat({ message: toSend, session_id: sessionId, strict: strictMode }, user.id)
       const agentMsg: ChatMessage = { 
         role: 'agent', 
         content: resp.response, 
@@ -70,8 +73,17 @@ const ChatPage: React.FC = () => {
   return (
     <div className="p-6 h-full flex flex-col">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-semibold text-win11-text-primary">Agent Chat</h2>
+        <h2 className="text-xl font-semibold text-win11-text-primary flex items-center gap-2">Agent Chat {strictMode && <span className="text-[10px] px-2 py-1 rounded-full bg-amber-500/20 text-amber-700 border border-amber-600/40">STRICT</span>}</h2>
         <div className="flex gap-2">
+          <label className="flex items-center gap-1 text-xs cursor-pointer select-none px-2 py-1 rounded-win11-small border border-win11-border bg-win11-surface hover:bg-win11-surfaceHover">
+            <input
+              type="checkbox"
+              checked={strictMode}
+              onChange={e => { setStrictMode(e.target.checked); try { localStorage.setItem('chat.strictMode', String(e.target.checked)) } catch {} }}
+              className="accent-win11-accent"
+            />
+            Strict
+          </label>
           <button
             onClick={() => { setSessionId(undefined); setMessages([]) }}
             className="px-3 py-1 rounded-win11-small text-sm border border-win11-border bg-win11-surface hover:bg-win11-surfaceHover"
