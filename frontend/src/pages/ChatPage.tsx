@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { diagnosticsService, ChatResponse, ChatSessionSummary } from '@/services/diagnosticsService'
 import { useAuth } from '@/contexts/AuthContext'
 
@@ -13,6 +14,8 @@ interface ChatMessage {
 
 const ChatPage: React.FC = () => {
   const { user } = useAuth()
+  const location = useLocation()
+  const navigate = useNavigate()
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -29,10 +32,59 @@ const ChatPage: React.FC = () => {
     try {
       const s = await diagnosticsService.listChatSessions(user.id)
       setSessions(s)
+      // Prune any local metadata entries that no longer exist server-side
+      try {
+        const metaKey = 'chat.sessionMeta'
+        const raw = localStorage.getItem(metaKey)
+        if (raw) {
+          const existing: any[] = JSON.parse(raw)
+          const validIds = new Set(s.map(ss => ss.session_id))
+            const filtered = existing.filter(m => validIds.has(m.session_id))
+            if (filtered.length !== existing.length) {
+              localStorage.setItem(metaKey, JSON.stringify(filtered))
+            }
+        }
+      } catch { /* ignore */ }
   } catch {/* ignore */} finally { /* no-op */ }
   }
 
   useEffect(() => { loadSessions() }, [user?.id])
+
+  // Resume specific session via ?session= id
+  useEffect(() => {
+    if (!user) return
+    const params = new URLSearchParams(location.search)
+    const target = params.get('session')
+    if (target) {
+      ;(async () => {
+        try {
+          const msgs = await diagnosticsService.listChatMessages(target, user.id)
+          const restored: ChatMessage[] = msgs.map(m => ({ role: m.role === 'agent' ? 'agent':'user', content: m.content, state: m.state_after, tables: m.tables }))
+          setSessionId(target)
+          setMessages(restored)
+        } catch {/* ignore */}
+      })()
+      // Clean URL
+      navigate('/chat', { replace: true })
+    }
+  }, [location.search, user?.id])
+
+  // Persist lightweight session metadata locally for dashboard recent list
+  useEffect(() => {
+    if (!sessionId || messages.length === 0) return
+    try {
+      const metaKey = 'chat.sessionMeta'
+      const existingRaw = localStorage.getItem(metaKey)
+      let existing: any[] = existingRaw ? JSON.parse(existingRaw) : []
+      const title = messages.find(m=>m.role==='user')?.content?.slice(0,60) || 'Chat Session'
+      const updated = new Date().toISOString()
+      existing = existing.filter(m => m.session_id !== sessionId)
+      existing.unshift({ session_id: sessionId, title, updated, message_count: messages.length })
+      // Cap stored sessions to 20
+      if (existing.length > 20) existing = existing.slice(0,20)
+      localStorage.setItem(metaKey, JSON.stringify(existing))
+    } catch {/* ignore */}
+  }, [messages, sessionId])
 
   const sendMessage = async () => {
     if (!input.trim() || !user) return
@@ -109,7 +161,20 @@ const ChatPage: React.FC = () => {
               }} className={`px-2 py-1 rounded-win11-small border text-ellipsis overflow-hidden max-w-[120px] ${sessionId===s.session_id?'bg-win11-primary text-white border-transparent':'bg-win11-surface border-win11-border hover:bg-win11-surfaceHover'}`}>{s.session_id.slice(0,8)}…</button>
               <button onClick={async () => {
                 if (!confirm('Delete this session?')) return
-                try { await diagnosticsService.deleteChatSession(s.session_id, user!.id); if (sessionId===s.session_id){ setSessionId(undefined); setMessages([])}; loadSessions() } catch {/* ignore */}
+                try { 
+                  await diagnosticsService.deleteChatSession(s.session_id, user!.id)
+                  if (sessionId===s.session_id){ setSessionId(undefined); setMessages([])}
+                  // Remove from localStorage meta immediately so dashboard is in sync
+                  try {
+                    const metaKey = 'chat.sessionMeta'
+                    const raw = localStorage.getItem(metaKey)
+                    if (raw) {
+                      const arr = JSON.parse(raw).filter((m: any) => m.session_id !== s.session_id)
+                      localStorage.setItem(metaKey, JSON.stringify(arr))
+                    }
+                  } catch { /* ignore */ }
+                  loadSessions() 
+                } catch {/* ignore */}
               }} className="px-1 py-1 rounded-win11-small border border-red-300 text-[10px] text-red-600 hover:bg-red-50">✕</button>
             </div>
           ))}

@@ -356,6 +356,114 @@ class AgentService:
             return "(Strict mode removed speculative content; no factual data returned. Provide a clarifying instruction or run a specific query.)"
         return result
 
+    # --- JSON/Table extraction helpers -------------------------------------------
+    def _extract_json_objects(self, text: str) -> list[Any]:
+        """Extract multiple JSON objects/lists from arbitrary concatenated text.
+
+        Uses a streaming brace/bracket depth scan to delimit JSON. More robust than
+        naive regex splitting for concatenated tool outputs.
+        """
+        results: list[Any] = []
+        if not text or ('{' not in text and '[' not in text):
+            return results
+        start_idx: int | None = None
+        depth = 0
+        in_string = False
+        escape = False
+        for i, ch in enumerate(text):
+            if start_idx is None:
+                if ch in '{[':
+                    start_idx = i
+                    depth = 1
+                    in_string = False
+                    escape = False
+                continue
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == '\\':
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+            else:
+                if ch == '"':
+                    in_string = True
+                elif ch in '{[':
+                    depth += 1
+                elif ch in '}]':
+                    depth -= 1
+                    if depth == 0 and start_idx is not None:
+                        candidate = text[start_idx:i+1].strip()
+                        try:
+                            results.append(json.loads(candidate))
+                        except Exception:
+                            pass
+                        start_idx = None
+            if start_idx is not None and (i - start_idx) > 200_000:
+                # safety cut — abandon overly large block
+                start_idx = None
+        return results
+
+    def _normalize_table_objects(self, objs: list[Any]) -> list[dict[str, Any]]:
+        """Normalize heterogeneous JSON shapes into table dictionaries.
+
+        Recognized patterns:
+        - {"table": {"columns": [...], "rows": [...]}}
+        - {"columns": [...], "rows": [...]}
+        - {"name": "X", "data": [{col:val,...}, ...]}
+        - Lists containing any mix of above
+        """
+        tables: list[dict[str, Any]] = []
+        def add(columns: list[Any], rows: list[list[Any]], total_rows: int | None = None, name: str | None = None):
+            tbl: dict[str, Any] = {
+                'columns': columns,
+                'rows': rows,
+                'total_rows': total_rows if total_rows is not None else len(rows)
+            }
+            if name:
+                tbl['name'] = name
+            tables.append(tbl)
+
+        def from_data_rows(obj: dict[str, Any]):
+            data_rows_any = obj.get('data')
+            if isinstance(data_rows_any, list) and data_rows_any and all(isinstance(r, dict) for r in data_rows_any):
+                columns: list[str] = []
+                for r in data_rows_any:
+                    for k in r.keys():
+                        if k not in columns:
+                            columns.append(k)
+                row_matrix = [[str(r.get(c, '')) for c in columns] for r in data_rows_any]
+                add(columns, row_matrix, name=str(obj.get('name')) if obj.get('name') else None)
+
+        queue: list[Any] = list(objs)
+        while queue:
+            obj = queue.pop(0)
+            if isinstance(obj, list):
+                queue[:0] = obj
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if 'table' in obj and isinstance(obj['table'], dict):
+                tbl = obj['table']
+                if all(k in tbl for k in ('columns', 'rows')):
+                    add(tbl.get('columns', []), tbl.get('rows', []), tbl.get('total_rows'), name=str(obj.get('name')) if obj.get('name') else None)
+            if 'columns' in obj and 'rows' in obj and isinstance(obj.get('columns'), list):
+                add(obj.get('columns', []), obj.get('rows', []), obj.get('total_rows'), name=str(obj.get('name')) if obj.get('name') else None)
+            if 'data' in obj and isinstance(obj.get('data'), list):
+                from_data_rows(obj)
+        return tables
+
+    def _dedupe_tables(self, tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        seen: set[str] = set()
+        unique: list[dict[str, Any]] = []
+        for t in tables:
+            name = t.get('name') or ''
+            sig = f"{name}:{tuple(t.get('columns', []))}:{len(t.get('rows', []))}"
+            if sig not in seen:
+                seen.add(sig)
+                unique.append(t)
+        return unique
+
     
     async def setup_agent(self, model_config: ModelConfiguration) -> bool:
         """Set up the Magentic One team with IntuneExpert agent"""
@@ -399,27 +507,23 @@ class AgentService:
             raise Exception(error_msg)
 
     async def query_diagnostics(self, query_type: str, parameters: dict[str, Any]) -> dict[str, Any]:
-        """Execute diagnostic query through the Magentic One team"""
+        """Execute diagnostic query through the Magentic One team (refactored)."""
         if not self.magentic_one_team:
             raise Exception("Magentic One team not initialized")
-        
         try:
             logger.info(f"Executing diagnostic query: {query_type}")
-            
-            # Handle scenario queries
             if query_type == "scenario":
                 scenario_ref = parameters.get("scenario") or parameters.get("name") or parameters.get("index")
                 if scenario_ref is None:
                     raise Exception("Parameter 'scenario' is required for scenario execution")
-                
                 try:
+                    scenario_ref_val: int | str
                     if isinstance(scenario_ref, str) and scenario_ref.isdigit():
-                        scenario_ref_val: int | str = int(scenario_ref)
+                        scenario_ref_val = int(scenario_ref)
                     else:
                         scenario_ref_val = str(scenario_ref)
                 except ValueError:
                     scenario_ref_val = str(scenario_ref)
-                
                 scenario_run = await self.run_instruction_scenario(scenario_ref_val)
                 return {
                     "query_type": "scenario",
@@ -430,97 +534,37 @@ class AgentService:
                     "summary": scenario_run.get("summary"),
                     "errors": scenario_run.get("errors", []),
                 }
-            
-            # For other query types, delegate to the Magentic One team
-            # The team will use MCP tools and instructions.md to handle the request
-            query_message = f"Please execute a {query_type} query with the following parameters: {parameters}"
-            
-            # Use the Magentic One team to process this request
-            try:
-                team_result = await self.magentic_one_team.run(task=query_message)
-                
-                # Extract results from team execution
-                if hasattr(team_result, 'messages') and team_result.messages:
-                    last_message = team_result.messages[-1]
-                    response_content = getattr(last_message, 'content', str(last_message))
-                    # Parse any table JSON payloads from all messages (reuse logic from chat())
-                    tables: list[dict[str, Any]] = []
-                    for m in team_result.messages:  # type: ignore[attr-defined]
-                        text = getattr(m, 'content', '') or ''
-                        if not isinstance(text, str):
-                            continue
-                        candidates: list[str] = []
-                        for match in re.finditer(r'\{', text):
-                            snippet = text[match.start():]
-                            cutoff = re.search(r'\n\n', snippet)
-                            if cutoff:
-                                snippet = snippet[:cutoff.start()]
-                            candidates.append(snippet.strip())
-                        if text.strip().startswith('{'):
-                            candidates.append(text.strip())
-                        for cand in candidates:
-                            if cand.count('{') != cand.count('}'):
-                                continue
-                            try:
-                                obj = json.loads(cand)
-                            except Exception:
-                                continue
-                            if isinstance(obj, dict):
-                                if 'table' in obj and isinstance(obj['table'], dict):
-                                    tbl = obj['table']
-                                    if all(k in tbl for k in ('columns', 'rows')):
-                                        tables.append({
-                                            'columns': tbl.get('columns', []),
-                                            'rows': tbl.get('rows', []),
-                                            'total_rows': tbl.get('total_rows', len(tbl.get('rows', [])))
-                                        })
-                                if 'columns' in obj and 'rows' in obj and isinstance(obj.get('columns'), list):
-                                    tables.append({
-                                        'columns': obj.get('columns', []),
-                                        'rows': obj.get('rows', []),
-                                        'total_rows': obj.get('total_rows', len(obj.get('rows', [])))
-                                    })
-                            elif isinstance(obj, list):
-                                for entry in obj:
-                                    if isinstance(entry, dict) and 'columns' in entry and 'rows' in entry:
-                                        tables.append({
-                                            'columns': entry.get('columns', []),
-                                            'rows': entry.get('rows', []),
-                                            'total_rows': entry.get('total_rows', len(entry.get('rows', [])))
-                                        })
-                    # De-duplicate
-                    seen: set[str] = set()
-                    unique_tables: list[dict[str, Any]] = []
-                    for t in tables:
-                        sig = f"{tuple(t.get('columns', []))}:{len(t.get('rows', []))}"
-                        if sig not in seen:
-                            seen.add(sig)
-                            unique_tables.append(t)
 
-                    return {
-                        "query_type": query_type,
-                        "parameters": parameters,
-                        "response": response_content,
-                        "team_execution": True,
-                        "summary": response_content or f"Executed {query_type} query via Magentic One team",
-                        "tables": unique_tables if unique_tables else None,
-                    }
-                else:
-                    raise Exception("No response from Magentic One team")
-                    
-            except Exception as e:
-                logger.error(f"Team execution failed for {query_type}: {e}")
-                return {
-                    "query_type": query_type,
-                    "parameters": parameters,
-                    "tables": [{
-                        "columns": ["Error"],
-                        "rows": [[f"Team execution failed: {str(e)}"]],
-                        "total_rows": 1
-                    }],
-                    "summary": f"Failed to execute {query_type} query via team: {str(e)}"
-                }
-                
+            query_message = f"Please execute a {query_type} query with the following parameters: {parameters}"
+            team_result = await self.magentic_one_team.run(task=query_message)
+            if not (hasattr(team_result, 'messages') and team_result.messages):
+                raise Exception("No response from Magentic One team")
+
+            last_message = team_result.messages[-1]
+            response_content = getattr(last_message, 'content', str(last_message))
+
+            extracted_objs: list[Any] = []
+            for m in team_result.messages:  # type: ignore[attr-defined]
+                msg_text = getattr(m, 'content', '') or ''
+                if not isinstance(msg_text, str):
+                    continue
+                objs = self._extract_json_objects(msg_text)
+                if objs:
+                    logger.debug(f"[query_diagnostics] Extracted {len(objs)} JSON object(s) from a message")
+                extracted_objs.extend(objs)
+            tables_all = self._normalize_table_objects(extracted_objs)
+            unique_tables = self._dedupe_tables(tables_all)
+            if unique_tables:
+                logger.debug(f"[query_diagnostics] Total tables after normalization: {len(unique_tables)}")
+
+            return {
+                "query_type": query_type,
+                "parameters": parameters,
+                "response": response_content,
+                "team_execution": True,
+                "summary": response_content or f"Executed {query_type} query via Magentic One team",
+                "tables": unique_tables if unique_tables else None,
+            }
         except Exception as e:
             error_msg = str(e) if str(e) else f"Unknown error of type {type(e).__name__}"
             logger.error(f"Diagnostic query failed: {error_msg}")
@@ -534,7 +578,6 @@ class AgentService:
                 }],
                 "summary": f"Diagnostic query failed: {error_msg}"
             }
-    
 
     async def chat(self, message: str, extra_parameters: dict[str, Any] | None = None) -> dict[str, Any]:
         """Natural language chat interface using the Magentic One team.
@@ -568,7 +611,6 @@ class AgentService:
             strict_mode = bool(extra_parameters.get("strict_mode")) if extra_parameters else False
 
             if history:
-                # Build a consolidated task including condensed prior turns. We avoid heuristics; we just replay prior turns verbatim.
                 history_lines = []
                 for turn in history:
                     role_tag = "USER" if turn["role"] == "user" else "ASSISTANT"
@@ -596,93 +638,38 @@ STRICT RESPONSE CONSTRAINTS (if any data not already retrieved DO NOT invent it)
                 else:
                     composite_task = message
 
-            # Use the Magentic One team to process the request with contextual composite task
             team_result = await self.magentic_one_team.run(task=composite_task)
-            
-            # Extract the response from the team result
-            if hasattr(team_result, 'messages') and team_result.messages:
-                last_message = team_result.messages[-1]
-                response_content = getattr(last_message, 'content', str(last_message))
-                # Attempt to extract any JSON table payloads that the IntuneExpert agent may have
-                # emitted earlier in the conversation (tools responses). We scan all messages for
-                # JSON objects containing a top-level 'table' key or a 'columns' + 'rows' pattern.
-                tables: list[dict[str, Any]] = []
-                for m in team_result.messages:  # type: ignore[attr-defined]
-                    text = getattr(m, 'content', '') or ''
-                    if not isinstance(text, str):
-                        continue
-                    # A message may contain multiple JSON objects concatenated. Split on newlines
-                    # and braces heuristically; then attempt json.loads on candidates.
-                    candidates: list[str] = []
-                    # Quick heuristic: find occurrences of '{' that might start JSON objects.
-                    for match in re.finditer(r'\{', text):
-                        snippet = text[match.start():]
-                        # Truncate at two consecutive newlines or end to keep size manageable
-                        cutoff = re.search(r'\n\n', snippet)
-                        if cutoff:
-                            snippet = snippet[:cutoff.start()]
-                        candidates.append(snippet.strip())
-                    # Also consider whole text if it looks like JSON
-                    if text.strip().startswith('{'):
-                        candidates.append(text.strip())
-                    for cand in candidates:
-                        # Balance braces quickly; skip obviously incomplete strings
-                        if cand.count('{') != cand.count('}'):
-                            continue
-                        try:
-                            obj = json.loads(cand)
-                        except Exception:
-                            continue
-                        # Normalize single table vs list
-                        if isinstance(obj, dict):
-                            if 'table' in obj and isinstance(obj['table'], dict):
-                                tbl = obj['table']
-                                if all(k in tbl for k in ('columns', 'rows')):
-                                    tables.append({
-                                        'columns': tbl.get('columns', []),
-                                        'rows': tbl.get('rows', []),
-                                        'total_rows': tbl.get('total_rows', len(tbl.get('rows', [])))
-                                    })
-                            # Some tools may return already as {'columns': [...], 'rows': [...]} directly
-                            if 'columns' in obj and 'rows' in obj and isinstance(obj.get('columns'), list):
-                                tables.append({
-                                    'columns': obj.get('columns', []),
-                                    'rows': obj.get('rows', []),
-                                    'total_rows': obj.get('total_rows', len(obj.get('rows', [])))
-                                })
-                        elif isinstance(obj, list):
-                            # List of table-like dicts
-                            for entry in obj:
-                                if isinstance(entry, dict) and 'columns' in entry and 'rows' in entry:
-                                    tables.append({
-                                        'columns': entry.get('columns', []),
-                                        'rows': entry.get('rows', []),
-                                        'total_rows': entry.get('total_rows', len(entry.get('rows', [])))
-                                    })
-                # De-duplicate tables (by columns+row count signature)
-                seen: set[str] = set()
-                unique_tables: list[dict[str, Any]] = []
-                for t in tables:
-                    sig = f"{tuple(t.get('columns', []))}:{len(t.get('rows', []))}"
-                    if sig not in seen:
-                        seen.add(sig)
-                        unique_tables.append(t)
-                return {
-                    "message": message,
-                    "response": self._apply_speculation_filter(response_content, unique_tables if unique_tables else None, strict_mode),
-                    "team_result": "success",
-                    "agent_used": "MagenticOneTeam",
-                    "tables": unique_tables if unique_tables else None,
-                    # Echo back limited history length & strict flag used so caller can debug continuity
-                    "state": {"history_turns": len(history), "strict": strict_mode} if (history or strict_mode) else None,
-                }
-            else:
-                # Fallback to simple intent detection if team doesn't return expected results
+            if not (hasattr(team_result, 'messages') and team_result.messages):
                 return await self._fallback_intent_detection(message, extra_parameters)
-                
+
+            last_message = team_result.messages[-1]
+            response_content = getattr(last_message, 'content', str(last_message))
+
+            extracted_objs: list[Any] = []
+            for m in team_result.messages:  # type: ignore[attr-defined]
+                msg_text = getattr(m, 'content', '') or ''
+                if not isinstance(msg_text, str):
+                    continue
+                objs = self._extract_json_objects(msg_text)
+                if objs:
+                    logger.debug(f"[chat] Extracted {len(objs)} JSON object(s) from a message")
+                extracted_objs.extend(objs)
+            tables_all = self._normalize_table_objects(extracted_objs)
+            unique_tables = self._dedupe_tables(tables_all)
+            if unique_tables:
+                logger.debug(f"[chat] Total tables after normalization: {len(unique_tables)}")
+
+            return {
+                "message": message,
+                "response": self._apply_speculation_filter(response_content, unique_tables if unique_tables else None, strict_mode),
+                "team_result": "success",
+                "agent_used": "MagenticOneTeam",
+                "tables": unique_tables if unique_tables else None,
+                "state": {"history_turns": len(history), "strict": strict_mode} if (history or strict_mode) else None,
+            }
+
         except Exception as e:
             logger.error(f"Magentic One team processing failed: {e}")
-            # Fallback to simple processing
             return await self._fallback_intent_detection(message, extra_parameters)
     
     async def _fallback_intent_detection(self, message: str, extra_parameters: dict[str, Any] | None = None) -> dict[str, Any]:

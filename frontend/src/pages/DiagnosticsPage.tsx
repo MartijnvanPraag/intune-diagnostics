@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '@/contexts/AuthContext'
 import { diagnosticsService, QueryType, DiagnosticRequest, AgentResponse, DiagnosticResponse } from '@/services/diagnosticsService'
 import DataTable from '@/components/DataTable'
@@ -8,6 +9,8 @@ import toast from 'react-hot-toast'
 
 const DiagnosticsPage: React.FC = () => {
   const { user } = useAuth()
+  const location = useLocation()
+  const navigate = useNavigate()
   const [queryTypes, setQueryTypes] = useState<QueryType[]>([])
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<AgentResponse | null>(null)
@@ -15,6 +18,7 @@ const DiagnosticsPage: React.FC = () => {
   const [selectedQueryType, setSelectedQueryType] = useState<QueryType | null>(null)
   const [selectedSessions, setSelectedSessions] = useState<Set<string>>(new Set())
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [loadingSession, setLoadingSession] = useState(false)
 
   const { register, handleSubmit, watch, reset, formState: { errors } } = useForm<{
     query_type: string
@@ -33,6 +37,38 @@ const DiagnosticsPage: React.FC = () => {
       loadRecentSessions()
     }
   }, [user])
+
+  // Deep link support: /diagnostics?session=<session_id>
+  useEffect(() => {
+    const params = new URLSearchParams(location.search)
+    const sessionId = params.get('session')
+    if (sessionId && user) {
+      (async () => {
+        try {
+          setLoadingSession(true)
+          const sess = await diagnosticsService.getDiagnosticSession(sessionId)
+          if (sess) {
+            const anyRes: any = sess.results
+            const tables = anyRes?.tables || []
+            setResult({
+              response: anyRes?.summary || anyRes?.response || 'Session loaded',
+              table_data: tables && tables.length>0 ? tables[0] : undefined,
+              tables: tables,
+              session_id: sess.session_id,
+            })
+          }
+        } catch (e) {
+          console.error('Failed to load session via deep link', e)
+          toast.error('Failed to load session')
+        } finally {
+          setLoadingSession(false)
+          const p2 = new URLSearchParams(location.search)
+          p2.delete('session')
+          navigate(`/diagnostics${p2.toString()?`?${p2.toString()}`:''}`, { replace: true })
+        }
+      })()
+    }
+  }, [location.search, user?.id])
 
   useEffect(() => {
     if (watchedQueryType) {
@@ -243,6 +279,7 @@ const DiagnosticsPage: React.FC = () => {
                   <h3 className="text-lg font-medium text-win11-text-primary mb-4">
                     Query Results
                   </h3>
+                  {loadingSession && <div className="text-xs text-win11-text-tertiary mb-2">Loading session…</div>}
                   
                   {result.tables && result.tables.length > 0 ? (
                     <div className="space-y-6">
@@ -378,19 +415,25 @@ const DiagnosticsPage: React.FC = () => {
                           </span>
                           <button
                             onClick={()=>{
-                              // Populate result viewer with stored tables / summary if present
-                              if (session.results) {
-                                const anyRes: any = session.results
-                                const tables = anyRes?.tables || []
-                                setResult({
-                                  response: anyRes?.summary || anyRes?.response || 'Session loaded',
-                                  table_data: tables && tables.length>0 ? tables[0] : undefined,
-                                  tables: tables,
-                                  session_id: session.session_id,
-                                })
-                              } else {
-                                setResult(null)
-                              }
+                              (async () => {
+                                try {
+                                  setLoadingSession(true)
+                                  const sess = await diagnosticsService.getDiagnosticSession(session.session_id)
+                                  const anyRes: any = sess.results
+                                  const tables = anyRes?.tables || []
+                                  setResult({
+                                    response: anyRes?.summary || anyRes?.response || 'Session loaded',
+                                    table_data: tables && tables.length>0 ? tables[0] : undefined,
+                                    tables: tables,
+                                    session_id: sess.session_id,
+                                  })
+                                } catch (e) {
+                                  console.error('Failed to load session', e)
+                                  toast.error('Failed to load session details')
+                                } finally {
+                                  setLoadingSession(false)
+                                }
+                              })()
                             }}
                             className="px-2 py-1 text-[10px] border border-win11-border rounded hover:bg-win11-surfaceHover"
                             title="Load this session's results"

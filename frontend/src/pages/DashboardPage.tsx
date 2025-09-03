@@ -1,8 +1,38 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
+import { useNavigate } from 'react-router-dom'
+
+interface LocalChatSessionMeta {
+  session_id: string
+  title: string
+  updated: string
+  message_count: number
+}
 
 const DashboardPage: React.FC = () => {
   const { user } = useAuth()
+  const navigate = useNavigate()
+  const [recentChats, setRecentChats] = useState<LocalChatSessionMeta[]>([])
+
+  // Load recent chat sessions from localStorage (populated by ChatPage modifications later)
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('chat.sessionMeta')
+      if (raw) {
+        const parsed: LocalChatSessionMeta[] = JSON.parse(raw)
+        // Sort by updated desc and take first 5
+        setRecentChats(parsed.sort((a,b)=> new Date(b.updated).getTime() - new Date(a.updated).getTime()).slice(0,5))
+      }
+    } catch {/* ignore */}
+  }, [])
+
+  const launchQuick = (id: string) => {
+    navigate(`/diagnostics?quick=${encodeURIComponent(id)}`)
+  }
+
+  const openChatSession = (session_id: string) => {
+    navigate(`/chat?session=${encodeURIComponent(session_id)}`)
+  }
 
   return (
     <div className="animate-fade-in">
@@ -24,10 +54,10 @@ const DashboardPage: React.FC = () => {
             Common diagnostic operations
           </p>
           <div className="space-y-2">
-            <button className="win11-button-secondary w-full text-sm">
+            <button className="win11-button-secondary w-full text-sm" onClick={()=>launchQuick('device_details')}>
               Device Lookup
             </button>
-            <button className="win11-button-secondary w-full text-sm">
+            <button className="win11-button-secondary w-full text-sm" onClick={()=>launchQuick('compliance')}>
               Compliance Check
             </button>
           </div>
@@ -40,9 +70,24 @@ const DashboardPage: React.FC = () => {
           <p className="text-win11-text-secondary text-sm mb-4">
             Your latest diagnostic queries
           </p>
-          <div className="text-win11-text-tertiary text-sm">
-            No recent sessions
-          </div>
+          {recentChats.length === 0 ? (
+            <div className="text-win11-text-tertiary text-sm">No recent sessions</div>
+          ) : (
+            <ul className="space-y-2 text-sm">
+              {recentChats.map(rc => (
+                <li key={rc.session_id} className="flex items-center justify-between">
+                  <button
+                    onClick={()=>openChatSession(rc.session_id)}
+                    className="text-left flex-1 truncate hover:underline"
+                    title={rc.title}
+                  >{rc.title || rc.session_id.slice(0,8)}</button>
+                  <span className="ml-2 text-[10px] text-win11-text-tertiary whitespace-nowrap">
+                    {new Date(rc.updated).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
 
         <div className="win11-card p-6">
