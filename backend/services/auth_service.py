@@ -1,19 +1,21 @@
 import os
-from typing import Optional
+import time
+from typing import Optional, Dict, Tuple
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider, InteractiveBrowserCredential, SharedTokenCacheCredential
 from azure.core.exceptions import ClientAuthenticationError
 import httpx
 import json
 
 class AuthService:
+    _token_cache: Dict[str, Tuple[float, str]] = {}
     def __init__(self):
         # Use DefaultAzureCredential with explicit exclusions to force WAM-compatible flow
         # Exclude Azure CLI and other problematic credential types that bypass WAM
         self.credential = DefaultAzureCredential(
             # Exclude credentials that don't use WAM broker
-            exclude_azure_cli_credential=True,
-            exclude_azure_powershell_credential=True,
-            exclude_visual_studio_code_credential=True,
+            exclude_azure_cli_credential=False,
+            exclude_azure_powershell_credential=False,
+            exclude_visual_studio_code_credential=False,
             exclude_environment_credential=True,
             exclude_managed_identity_credential=True,
             # Keep only Interactive Browser and Shared Token Cache (which uses WAM)
@@ -56,25 +58,52 @@ class AuthService:
                 self.graph_scope
             )
         
-        print("Authentication initialized - Azure CLI excluded, WAM broker preferred")
+    print("Authentication initialized - Azure CLI excluded, WAM broker preferred")
+    # In-memory token cache: scope -> (expires_on_epoch, token)
+    # Instance will reuse class-level dict; could also choose self._token_cache = {} to isolate
     
-    async def get_access_token(self, scope: str = None) -> str:
-        """Get an access token using WAM broker credential"""
+    async def get_access_token(self, scope: Optional[str] = None, force_refresh: bool = False) -> str:
+        """Get an access token (cached) using WAM broker credential.
+
+        Token reuse logic: store token per scope with 2 minute safety buffer before expiry.
+        """
         target_scope = scope or self.graph_scope
-        
+        now = time.time()
+        cached = self._token_cache.get(target_scope)
+        if cached and not force_refresh:
+            exp, tok = cached
+            if exp - 120 > now:  # 2 minute buffer
+                return tok
         try:
-            # Try WAM broker credential first
             token = self.wam_credential.get_token(target_scope)
-            print(f"Successfully obtained token using WAM broker for scope: {target_scope}")
+            # azure-identity returns expires_on as int epoch
+            self._token_cache[target_scope] = (float(getattr(token, 'expires_on', now + 3000)), token.token)
             return token.token
         except Exception as e:
             print(f"WAM broker authentication failed, trying restricted DefaultAzureCredential: {e}")
             try:
-                # Fallback to restricted DefaultAzureCredential (no CLI)
                 token = self.credential.get_token(target_scope)
+                self._token_cache[target_scope] = (float(getattr(token, 'expires_on', now + 3000)), token.token)
                 return token.token
             except ClientAuthenticationError as fallback_e:
                 raise Exception(f"Authentication failed with both WAM and restricted credential: {str(fallback_e)}")
+
+    async def get_kusto_token(self, cluster_url: str) -> str:
+        """Return cached access token for a Kusto cluster resource scope.
+
+        Kusto AAD scope pattern: https://{cluster_host}/.default
+        Accept full https://... or just host; normalize host.
+        """
+        if not cluster_url:
+            raise ValueError("cluster_url required for Kusto token")
+        host = cluster_url
+        if host.startswith('https://'):
+            host = host[len('https://'):]
+        if host.startswith('http://'):
+            host = host[len('http://'):]
+        host = host.rstrip('/')
+        scope = f"https://{host}/.default"
+        return await self.get_access_token(scope)
     
     async def get_cognitive_services_token(self) -> str:
         """Get access token specifically for Azure Cognitive Services"""
@@ -84,7 +113,7 @@ class AuthService:
         """Get access token specifically for Microsoft Graph"""
         return await self.get_access_token(self.graph_scope)
     
-    async def get_user_info(self, access_token: str = None) -> dict:
+    async def get_user_info(self, access_token: Optional[str] = None) -> dict:
         """Get user information from Microsoft Graph"""
         if not access_token:
             access_token = await self.get_graph_token()

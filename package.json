@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "description": "Modern web app for Intune diagnostics with Agentic AI",
   "scripts": {
-    "dev": "concurrently \"npm run backend:dev\" \"npm run frontend:dev\"",
-    "backend:dev": "cd backend && uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000",
+  "dev": "concurrently --name backend,frontend --prefix name --restart-tries=100 --restart-after=2000 \"npm run backend:dev\" \"npm run frontend:dev\"",
+  "backend:dev": "cd backend && uv run uvicorn main:app --reload --reload-exclude services/kusto_mcp_service.py --reload-exclude services/auth_service.py --host 0.0.0.0 --port 8000",
     "frontend:dev": "cd frontend && npm run dev",
     "frontend:install": "cd frontend && npm install",
     "backend:install": "uv sync",

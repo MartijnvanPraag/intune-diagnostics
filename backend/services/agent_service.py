@@ -191,7 +191,21 @@ class AgentService:
     @classmethod
     async def cleanup(cls) -> None:
         """Cleanup agent service resources"""
-        pass
+        try:
+            # Attempt to cleanup Kusto MCP service if loaded
+            try:
+                from services.kusto_mcp_service import kusto_mcp_service
+                if kusto_mcp_service:
+                    await kusto_mcp_service.cleanup()
+            except Exception as mcp_err:  # noqa: BLE001
+                logger.warning(f"MCP service cleanup warning: {mcp_err}")
+
+            global agent_service
+            agent_service = None
+            logger.info("AgentService cleanup completed")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"AgentService cleanup failed: {e}")
+            # Swallow errors so reload can proceed
     
     async def _load_instructions(self) -> None:
         """Load instructions.md content for agent context"""

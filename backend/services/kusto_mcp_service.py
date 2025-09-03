@@ -129,9 +129,16 @@ class KustoMCPService:
         for tool_name in execute_tool_candidates:
             try:
                 logger.info(f"Calling MCP tool '{tool_name}'")
+                # Acquire (cached) AAD token for the cluster
+                try:
+                    from services.auth_service import auth_service
+                    access_token = await auth_service.get_kusto_token(cluster_url)
+                except Exception as token_err:  # noqa: BLE001
+                    logger.warning(f"Failed to acquire Kusto token (continuing unauthenticated) : {token_err}")
+                    access_token = None  # type: ignore
                 result = await self._session.call_tool(
                     tool_name,
-                    {"clusterUrl": cluster_url, "database": database, "query": query, **(parameters or {})}
+                    {"clusterUrl": cluster_url, "database": database, "query": query, **({} if parameters is None else parameters), **({"accessToken": access_token} if access_token else {})}
                 )
                 return self._normalize_tool_result(result)
             except Exception as e:  # noqa: BLE001
