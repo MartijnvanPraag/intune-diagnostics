@@ -43,7 +43,9 @@ class ChatMessageRecord(BaseModel):
     role: str
     content: str
     params: Optional[dict]
-    tables: Optional[dict]
+    # Stored agent responses use a list of table objects (each with columns, rows, total_rows)
+    # Original schema incorrectly declared this as a single dict causing validation errors when a list is present.
+    tables: Optional[List[dict]]
     intent: Optional[str]
     clarification_needed: bool
     created_at: Optional[str]
