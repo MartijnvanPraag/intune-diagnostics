@@ -187,8 +187,73 @@ const ChatPage: React.FC = () => {
             <div className="whitespace-pre-wrap">{m.content}</div>
             {m.tables && m.tables.length > 0 && (
               <div className="mt-3 space-y-4">
+                {/* Export controls for this agent message */}
+                <div className="flex gap-2 mb-2 text-[10px] flex-wrap">
+                  <button
+                    onClick={() => {
+                      // Aggregate all tables to one JSON blob
+                      const blob = new Blob([JSON.stringify(m.tables, null, 2)], { type: 'application/json' })
+                      const url = URL.createObjectURL(blob)
+                      const a = document.createElement('a')
+                      a.href = url
+                      a.download = `chat-${sessionId || 'session'}-message-${idx}-tables.json`
+                      a.click(); URL.revokeObjectURL(url)
+                    }}
+                    className="px-2 py-1 border border-win11-border rounded hover:bg-win11-surfaceHover"
+                  >All JSON</button>
+                  <button
+                    onClick={() => {
+                      // Merge rows across tables (keeping columns per table) into one CSV file with table index prefix
+                      const esc = (v: any) => '"' + String(v).replace(/"/g,'""') + '"'
+                      const csv: string[] = []
+                      m.tables!.forEach((t, ti2) => {
+                        csv.push(`# Table ${ti2+1}`)
+                        csv.push(t.columns.map(esc).join(','))
+                        t.rows.forEach(r => csv.push(r.map(esc).join(',')))
+                        csv.push('')
+                      })
+                      const blob = new Blob([csv.join('\n')], { type: 'text/csv;charset=utf-8;' })
+                      const url = URL.createObjectURL(blob)
+                      const a = document.createElement('a')
+                      a.href = url
+                      a.download = `chat-${sessionId || 'session'}-message-${idx}-tables.csv`
+                      a.click(); URL.revokeObjectURL(url)
+                    }}
+                    className="px-2 py-1 border border-win11-border rounded hover:bg-win11-surfaceHover"
+                  >All CSV</button>
+                </div>
                 {m.tables.map((t, ti) => (
                   <div key={ti} className="overflow-x-auto border border-win11-border rounded">
+                    <div className="flex justify-between items-center px-2 py-1 bg-win11-surface text-[10px]">
+                      <span>Table {ti+1} ({t.rows.length} rows)</span>
+                      <div className="flex gap-1">
+                        <button
+                          onClick={() => {
+                            const esc = (v: any) => '"' + String(v).replace(/"/g,'""') + '"'
+                            const csv: string[] = [t.columns.map(esc).join(',')]
+                            t.rows.forEach(r => csv.push(r.map(esc).join(',')))
+                            const blob = new Blob([csv.join('\n')], { type: 'text/csv;charset=utf-8;' })
+                            const url = URL.createObjectURL(blob)
+                            const a = document.createElement('a')
+                            a.href = url
+                            a.download = `chat-${sessionId || 'session'}-message-${idx}-table-${ti+1}.csv`
+                            a.click(); URL.revokeObjectURL(url)
+                          }}
+                          className="px-2 py-0.5 border border-win11-border rounded hover:bg-win11-surfaceHover"
+                        >CSV</button>
+                        <button
+                          onClick={() => {
+                            const blob = new Blob([JSON.stringify(t, null, 2)], { type: 'application/json' })
+                            const url = URL.createObjectURL(blob)
+                            const a = document.createElement('a')
+                            a.href = url
+                            a.download = `chat-${sessionId || 'session'}-message-${idx}-table-${ti+1}.json`
+                            a.click(); URL.revokeObjectURL(url)
+                          }}
+                          className="px-2 py-0.5 border border-win11-border rounded hover:bg-win11-surfaceHover"
+                        >JSON</button>
+                      </div>
+                    </div>
                     <table className="min-w-full text-xs">
                       <thead className="bg-win11-surface">
                         <tr>
