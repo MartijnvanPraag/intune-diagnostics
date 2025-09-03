@@ -343,3 +343,86 @@ DeviceManagementProvider
 
 cluster("https://qrybkradxus01pe.westus2.kusto.windows.net").database("qrybkradxglobaldb").MTPartnerTenantService_Snapshot
 |where AccountId == "<Intune Account Id>"
+
+
+### DCv1 and DCv2 conflict Identification
+
+let DeviceID = "<deviceid>";
+let base_query = (cluster: string, source: string) {
+    let Device_Snapshot = cluster(cluster).database('qrybkradxglobaldb').Device_Snapshot;
+    let AccountID = toscalar(Device_Snapshot | where DeviceId == DeviceID | project AccountId);
+    let ASU = toscalar(Device_Snapshot | where DeviceId == DeviceID | project ScaleUnitName);
+    let PolicySettingMap = materialize(cluster(cluster).database('qrybkradxglobaldb').PolicySettingMapV3_Snapshot | where AccountId == AccountID);
+    let SettingsLevelData = 
+        cluster(cluster).database('qrybkradxglobaldb').IntentSettingStatusPerDevicePerUserV2_Snapshot
+        | where ScaleUnitName == ASU and AccountId == AccountID and DeviceId == DeviceID
+        | extend Source="IntentSettingStatus", LastModifiedTimeUtc=IntentSettingStatusPerDevicePerUserLastUpdateTimeUTC
+        | union (
+            cluster(cluster).database('qrybkradxglobaldb').SettingStatusPerDevicePerUserV1_Snapshot
+            | where ScaleUnitName == ASU and AccountId == AccountID and DeviceId == DeviceID
+            | join kind=leftouter PolicySettingMap on $left.SettingId == $right.SettingId
+            | extend Source="SettingStatusV1", LastModifiedTimeUtc=SspdpuLastModifiedTimeUtc)
+        | union (
+            cluster(cluster).database('qrybkradxglobaldb').SettingStatusPerDevicePerUserV3_Snapshot
+            | where ScaleUnitName == ASU and AccountId == AccountID and DeviceId == DeviceID
+            | extend Source="SettingStatusV3", LastModifiedTimeUtc=SspdpuLastModifiedTimeUtc)
+        | union (
+            cluster(cluster).database('qrybkradxglobaldb').AdmxPolicySettingStatusPerDevicePerUserV1_Snapshot
+            | where ScaleUnitName == ASU and AccountId == AccountID and DeviceId == DeviceID
+            | extend Source="AdmxSettingStatus", LastModifiedTimeUtc=LastModifiedTimeUtc)
+        | project DeviceId, UserId, PolicyId, SettingName, SettingInstancePath,
+                 Status = case(SettingStatus == 0, "Unknown", SettingStatus == 1, "NotApplicable", SettingStatus == 2, "Compliant", SettingStatus == 3, "Remediated", SettingStatus == 4, "NotCompliant", SettingStatus == 5, "Error", SettingStatus == 6, "Conflict", ""),
+                 ErrorTypeName = case(ErrorType == 0, "None", ErrorType == 1, "DeviceCheckinDiscovery", ErrorType == 2, "DeviceCheckinRemediation", ErrorType == 3, "DeviceCheckinCompliance", ErrorType == 4, "DeviceCheckinProcessing", ErrorType == 5, "DeviceCheckinConflict", ErrorType == 6, "DeviceCheckinConflictResolution", ErrorType == 7, "PolicyReportProcessing", ErrorType == 32, "GroupPolicy", ErrorType == 64, "DFCI", "Other"),
+                 ErrorCode, LastModifiedTimeUtc, PolicyVersion, SettingId, SettingInstanceId, Source
+        | distinct DeviceId, UserId, PolicyId, SettingName, SettingInstancePath, Status, ErrorTypeName, ErrorCode, LastModifiedTimeUtc, PolicyVersion, SettingId, SettingInstanceId, Source;
+    let PolicyMetadata = 
+        cluster(cluster).database('qrybkradxglobaldb').CombinedPolicyMetadataWithScopeTags_Snapshot
+        | where ScaleUnitName == ASU and AccountId == AccountID
+        | extend Source="PolicyMetadata"
+        | union (
+            cluster(cluster).database('qrybkradxglobaldb').DeviceIntentMetadataV2_Snapshot
+            | where ScaleUnitName == ASU and AccountId == AccountID
+            | extend Source="IntentMetadata")
+        | union (
+            cluster(cluster).database('qrybkradxglobaldb').PolicyMetadataV1_Snapshot
+            | where ScaleUnitName == ASU and AccountId == AccountID
+            | extend Source="PolicyMetadataV1")
+        | project PolicyId, PolicyName, PolicyBaseTypeName;
+    let PayloadTypeMap = cluster(cluster).database('qrybkradxglobaldb').DeploymentStatus_Snapshot
+        | where AccountId == AccountID
+        | distinct PayloadId, PayloadType;    SettingsLevelData
+    | join kind=leftouter PayloadTypeMap on $left.PolicyId == $right.PayloadId
+    | join kind=leftouter PolicyMetadata on PolicyId
+    | extend PayloadTypeDescription = case(PayloadType == 1, "DCv1", PayloadType == 29, "DCv2", strcat("PayloadType_", tostring(PayloadType))), HasSettingDetails = true
+    | where PayloadType in (1, 29) and Status == "Conflict"
+    | as ConflictData    | join kind=leftouter (
+        ConflictData 
+        | where PayloadTypeDescription == "DCv1"
+        | extend 
+            HasKeyPattern = SettingInstancePath contains "Key='",
+            ExtractedPath = case(
+                SettingInstancePath contains "Key='",
+                tostring(split(SettingInstancePath, "Key='")[1]),
+                SettingInstancePath
+            )
+        | extend 
+            CleanPath = case(
+                HasKeyPattern,
+                tostring(split(ExtractedPath, "'")[0]),
+                ExtractedPath
+            )
+        | extend DCv1_SettingName = tostring(split(CleanPath, "/")[-1])
+        | project DeviceId, UserId, DCv1_PolicyId = PolicyId, DCv1_PolicyName = PolicyName, DCv1_SettingName, DCv1_SettingInstancePath = SettingInstancePath
+    ) on DeviceId, UserId, $left.SettingName == $right.DCv1_SettingName
+    | project AccountID, DeviceId, UserId, PolicyId, PolicyName, PolicyBaseTypeName, PayloadType, PayloadTypeDescription, SettingName,
+             ConflictingDCv1_PolicyId = case(PayloadTypeDescription == "DCv2", DCv1_PolicyId, ""),
+             ConflictingDCv1_PolicyName = case(PayloadTypeDescription == "DCv2", DCv1_PolicyName, ""),
+             ConflictingDCv1_SettingPath = case(PayloadTypeDescription == "DCv2", DCv1_SettingInstancePath, ""),
+             SettingInstancePath, Status, ErrorTypeName, ErrorCode, LastModifiedTimeUtc, PolicyVersion, SettingId, SettingInstanceId, Source, HasSettingDetails
+    | where ConflictingDCv1_PolicyId != ""
+    | distinct *
+    | order by PolicyId, HasSettingDetails desc, SettingName
+};
+union
+   base_query('qrybkradxeu01pe.northeurope', 'europe'),  
+   base_query('qrybkradxus01pe.westus2', 'Non-EU') 
