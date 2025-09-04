@@ -344,10 +344,12 @@ DeviceManagementProvider
 cluster("https://qrybkradxus01pe.westus2.kusto.windows.net").database("qrybkradxglobaldb").MTPartnerTenantService_Snapshot
 |where AccountId == "<Intune Account Id>"
 
+### Identify conflicting DCv1 and DCv2 policies
 
-### DCv1 and DCv2 conflict Identification
+Use this query to identify conflicting DCv1 and DCv2 policies. Replace the placeholder with the deviceId the user is interested in.
 
-let DeviceID = "<deviceid>";
+```Kusto
+let DeviceID = '<deviceId>';
 let base_query = (cluster: string, source: string) {
     let Device_Snapshot = cluster(cluster).database('qrybkradxglobaldb').Device_Snapshot;
     let AccountID = toscalar(Device_Snapshot | where DeviceId == DeviceID | project AccountId);
@@ -425,4 +427,5 @@ let base_query = (cluster: string, source: string) {
 };
 union
    base_query('qrybkradxeu01pe.northeurope', 'europe'),  
-   base_query('qrybkradxus01pe.westus2', 'Non-EU') 
+   base_query('qrybkradxus01pe.westus2', 'Non-EU')
+```
