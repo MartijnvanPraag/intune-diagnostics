@@ -14,7 +14,7 @@ const Navigation: React.FC = () => {
 
   const navItems = [
     { to: '/', icon: HomeIcon, label: 'Dashboard' },
-    { to: '/diagnostics', icon: ComputerDesktopIcon, label: 'Diagnostics' },
+    { to: '/scenarios', icon: ComputerDesktopIcon, label: 'Scenarios' },
   { to: '/chat', icon: ComputerDesktopIcon, label: 'Chat' },
     { to: '/settings', icon: Cog6ToothIcon, label: 'Settings' },
   ]

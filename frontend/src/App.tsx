@@ -19,6 +19,7 @@ function App() {
               <Route index element={<DashboardPage />} />
               <Route path="settings" element={<SettingsPage />} />
               <Route path="diagnostics" element={<DiagnosticsPage />} />
+              <Route path="scenarios" element={<DiagnosticsPage />} />
               <Route path="chat" element={<ChatPage />} />
             </Route>
           </Routes>

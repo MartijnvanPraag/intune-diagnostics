@@ -27,7 +27,7 @@ const DashboardPage: React.FC = () => {
   }, [])
 
   const launchQuick = (id: string) => {
-    navigate(`/diagnostics?quick=${encodeURIComponent(id)}`)
+    navigate(`/scenarios?quick=${encodeURIComponent(id)}`)
   }
 
   const openChatSession = (session_id: string) => {
