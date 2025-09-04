@@ -381,9 +381,21 @@ async def get_available_query_types():
             },
             {
                 "id": "policy_status",
-                "name": "Policy Status",
-                "description": "Get policy and setting status for the device",
+                "name": "Policy / Setting Status",
+                "description": "Get policy and setting status for the device (per-device policy & setting evaluations)",
                 "required_params": ["device_id", "context_id"]
+            },
+            {
+                "id": "policy_assignments",
+                "name": "Policy Assignments",
+                "description": "List policy assignments for the tenant filtered by optional policy/payload or group context",
+                "required_params": ["account_id"]
+            },
+            {
+                "id": "policy_conflicts_dcv1_v_dcv2",
+                "name": "Conflicting DCv1 vs DCv2 Policies",
+                "description": "Identify conflicting DCv1 and DCv2 policy settings for a device",
+                "required_params": ["device_id"]
             },
             {
                 "id": "user_lookup",

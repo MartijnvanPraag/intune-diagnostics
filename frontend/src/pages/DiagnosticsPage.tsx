@@ -38,6 +38,29 @@ const DiagnosticsPage: React.FC = () => {
     }
   }, [user])
 
+  // Handle quick action deep links: /diagnostics?quick=<query_type>
+  useEffect(() => {
+    const params = new URLSearchParams(location.search)
+    const quick = params.get('quick')
+    if (quick && queryTypes.length > 0) {
+      const match = queryTypes.find(q => q.id === quick)
+      if (match) {
+        // Set form value and selected type
+        reset({ query_type: match.id })
+        setSelectedQueryType(match)
+        // Optionally remove the quick param to avoid re-triggering
+        const p2 = new URLSearchParams(location.search)
+        p2.delete('quick')
+        navigate(`/diagnostics${p2.toString()?`?${p2.toString()}`:''}`, { replace: true })
+        // Scroll into view for clarity
+        setTimeout(() => {
+          const el = document.querySelector('form')
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        }, 50)
+      }
+    }
+  }, [location.search, queryTypes])
+
   // Deep link support: /diagnostics?session=<session_id>
   useEffect(() => {
     const params = new URLSearchParams(location.search)
