@@ -290,6 +290,12 @@ class AgentService:
         Your role is to interpret natural language requests from support engineers and execute the appropriate
         Kusto queries using the MCP server tools to retrieve and analyze Intune device diagnostics information.
         
+    INFRASTRUCTURE LABELS (IGNORE):
+    - Any internal agent/orchestrator names such as "MagenticOneOrchestrator", "IntuneDiagnosticsTeam", or other system-generated identifiers are infrastructure metadata.
+    - They are NOT user facts, NOT products, and NOT part of the Intune diagnostic domain.
+    - Do NOT list them under GIVEN FACTS or treat them as entities that require lookup or explanation.
+    - If they appear in prior context, silently ignore them unless explicitly asked by the user to explain internal architecture (rare; otherwise omit).
+        
         CRITICAL INSTRUCTIONS FROM INSTRUCTIONS.MD:
         {self.instructions_content}
         
@@ -496,7 +502,7 @@ class AgentService:
             self.magentic_one_team = MagenticOneGroupChat(
                 participants=[self.intune_expert_agent],
                 model_client=self.model_client,
-                name="IntuneDignosticsTeam",
+                name="IntuneDiagnosticsTeam",
                 description="Autogen Magentic One team for Intune diagnostics and troubleshooting",
                 termination_condition=termination_condition,
                 max_turns=20,
