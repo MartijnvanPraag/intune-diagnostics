@@ -42,6 +42,7 @@ export interface QueryType {
   name: string
   description: string
   required_params: string[]
+  scenario_type?: 'simple' | 'advanced'
 }
 
 export interface ChatRequest {

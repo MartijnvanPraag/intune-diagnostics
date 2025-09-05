@@ -21,7 +21,8 @@
       "Bash(taskkill:*)",
       "Bash(uv add:*)",
       "Bash(pip show:*)",
-      "Bash(uv pip:*)"
+      "Bash(uv pip:*)",
+      "Bash(powershell:*)"
     ],
     "deny": []
   }

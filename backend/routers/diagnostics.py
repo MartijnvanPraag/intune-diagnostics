@@ -371,61 +371,71 @@ async def get_available_query_types():
                 "id": "device_details",
                 "name": "Device Details",
                 "description": "Get comprehensive device information including OS version, enrollment details, and basic properties",
-                "required_params": ["device_id"]
+                "required_params": ["device_id"],
+                "scenario_type": "simple"
             },
             {
                 "id": "compliance",
                 "name": "Compliance Status",
                 "description": "Check device compliance status changes over the last 10 days",
-                "required_params": ["device_id"]
+                "required_params": ["device_id"],
+                "scenario_type": "simple"
             },
             {
                 "id": "policy_status",
                 "name": "Policy / Setting Status",
                 "description": "Get policy and setting status for the device (per-device policy & setting evaluations)",
-                "required_params": ["device_id", "context_id"]
+                "required_params": ["device_id", "context_id"],
+                "scenario_type": "simple"
             },
             {
                 "id": "policy_assignments",
                 "name": "Policy Assignments",
                 "description": "List policy assignments for the tenant filtered by optional policy/payload or group context",
-                "required_params": ["account_id"]
+                "required_params": ["account_id"],
+                "scenario_type": "simple"
             },
             {
                 "id": "policy_conflicts_dcv1_v_dcv2",
                 "name": "Conflicting DCv1 vs DCv2 Policies",
                 "description": "Identify conflicting DCv1 and DCv2 policy settings for a device",
-                "required_params": ["device_id"]
+                "required_params": ["device_id"],
+                "scenario_type": "advanced"
             },
             {
                 "id": "user_lookup",
                 "name": "User Lookup",
                 "description": "Find user IDs associated with the device",
-                "required_params": ["device_id"]
+                "required_params": ["device_id"],
+                "scenario_type": "simple"
             },
             {
                 "id": "tenant_info",
                 "name": "Tenant Information",
                 "description": "Get tenant details including flighting tags and scale unit",
-                "required_params": ["account_id"]
+                "required_params": ["account_id"],
+                "scenario_type": "simple"
             },
             {
                 "id": "effective_groups",
                 "name": "Effective Groups",
                 "description": "Get effective group memberships and policy assignments",
-                "required_params": ["device_id", "account_id"]
+                "required_params": ["device_id", "account_id"],
+                "scenario_type": "simple"
             },
             {
                 "id": "applications",
                 "name": "Application Status",
                 "description": "Get application deployment status and installation attempts",
-                "required_params": ["device_id"]
+                "required_params": ["device_id"],
+                "scenario_type": "simple"
             },
             {
                 "id": "mam_policy",
                 "name": "MAM Policy",
                 "description": "Check Mobile Application Management policy status",
-                "required_params": ["device_id", "context_id"]
+                "required_params": ["device_id", "context_id"],
+                "scenario_type": "simple"
             }
         ]
     }

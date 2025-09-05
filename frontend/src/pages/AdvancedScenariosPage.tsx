@@ -7,7 +7,7 @@ import { useForm } from 'react-hook-form'
 import { MagnifyingGlassIcon, ClockIcon, ExclamationTriangleIcon, TrashIcon, XMarkIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 
-const DiagnosticsPage: React.FC = () => {
+const AdvancedScenariosPage: React.FC = () => {
   const { user } = useAuth()
   const location = useLocation()
   const navigate = useNavigate()
@@ -38,7 +38,7 @@ const DiagnosticsPage: React.FC = () => {
     }
   }, [user])
 
-  // Handle quick action deep links: /scenarios?quick=<query_type>
+  // Handle quick action deep links: /scenarios/advanced?quick=<query_type>
   useEffect(() => {
     const params = new URLSearchParams(location.search)
     const quick = params.get('quick')
@@ -51,7 +51,7 @@ const DiagnosticsPage: React.FC = () => {
         // Optionally remove the quick param to avoid re-triggering
         const p2 = new URLSearchParams(location.search)
         p2.delete('quick')
-        navigate(`/scenarios${p2.toString()?`?${p2.toString()}`:''}`, { replace: true })
+        navigate(`/scenarios/advanced${p2.toString()?`?${p2.toString()}`:''}`, { replace: true })
         // Scroll into view for clarity
         setTimeout(() => {
           const el = document.querySelector('form')
@@ -61,7 +61,7 @@ const DiagnosticsPage: React.FC = () => {
     }
   }, [location.search, queryTypes])
 
-  // Deep link support: /scenarios?session=<session_id>
+  // Deep link support: /scenarios/advanced?session=<session_id>
   useEffect(() => {
     const params = new URLSearchParams(location.search)
     const sessionId = params.get('session')
@@ -87,7 +87,7 @@ const DiagnosticsPage: React.FC = () => {
           setLoadingSession(false)
           const p2 = new URLSearchParams(location.search)
           p2.delete('session')
-          navigate(`/scenarios${p2.toString()?`?${p2.toString()}`:''}`, { replace: true })
+          navigate(`/scenarios/advanced${p2.toString()?`?${p2.toString()}`:''}`, { replace: true })
         }
       })()
     }
@@ -103,9 +103,9 @@ const DiagnosticsPage: React.FC = () => {
   const loadQueryTypes = async () => {
     try {
       const response = await diagnosticsService.getQueryTypes()
-      // Filter to only show simple scenarios
-      const simpleScenarios = response.query_types.filter(qt => qt.scenario_type === 'simple' || !qt.scenario_type)
-      setQueryTypes(simpleScenarios)
+      // Filter to only show advanced scenarios
+      const advancedScenarios = response.query_types.filter(qt => qt.scenario_type === 'advanced')
+      setQueryTypes(advancedScenarios)
     } catch (error) {
       console.error('Failed to load query types:', error)
       toast.error('Failed to load available query types')
@@ -145,11 +145,11 @@ const DiagnosticsPage: React.FC = () => {
       const response = await diagnosticsService.executeQuery(request, user!.id)
       setResult(response)
       await loadRecentSessions()
-      toast.success('Scenario executed successfully!')
+      toast.success('Advanced scenario executed successfully!')
     } catch (error) {
       const err: any = error
-      console.error('Scenario failed:', err)
-      toast.error(`Failed to execute diagnostic scenario: ${err?.response?.data?.detail || err?.message}`)
+      console.error('Advanced scenario failed:', err)
+      toast.error(`Failed to execute advanced diagnostic scenario: ${err?.response?.data?.detail || err?.message}`)
     } finally {
       setLoading(false)
     }
@@ -169,10 +169,10 @@ const DiagnosticsPage: React.FC = () => {
     <div className="animate-fade-in">
       <div className="mb-6">
         <h1 className="text-3xl font-semibold text-win11-text-primary mb-2">
-          Intune Scenarios
+          Advanced Intune Scenarios
         </h1>
         <p className="text-win11-text-secondary">
-          Pick from a set of curated scenarios to run targeted Intune data lookups and get quick, AI‑assisted insights.
+          Advanced scenarios for complex Intune data analysis and diagnostics. These scenarios provide more detailed configurations and advanced query capabilities.
         </p>
       </div>
 
@@ -182,14 +182,14 @@ const DiagnosticsPage: React.FC = () => {
           <div className="win11-card p-6">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-xl font-medium text-win11-text-primary">
-                Scenario
+                Advanced Scenario
               </h2>
               {result && (
                 <button
                   onClick={handleNewQuery}
                   className="win11-button-secondary text-sm"
                 >
-                  New Scenario
+                  New Advanced Scenario
                 </button>
               )}
             </div>
@@ -198,13 +198,13 @@ const DiagnosticsPage: React.FC = () => {
               <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-win11-text-primary mb-2">
-                    Scenario Type
+                    Advanced Scenario Type
                   </label>
                   <select
-                    {...register('query_type', { required: 'Please select a scenario' })}
+                    {...register('query_type', { required: 'Please select an advanced scenario' })}
                     className="win11-input w-full"
                   >
-                    <option value="">Select a scenario...</option>
+                    <option value="">Select an advanced scenario...</option>
                     {queryTypes.map(qt => (
                       <option key={qt.id} value={qt.id}>{qt.name}</option>
                     ))}
@@ -285,12 +285,12 @@ const DiagnosticsPage: React.FC = () => {
                       {loading ? (
                         <span className="flex items-center justify-center space-x-2">
                           <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                          <span>Running Scenario...</span>
+                          <span>Running Advanced Scenario...</span>
                         </span>
                       ) : (
                         <span className="flex items-center justify-center space-x-2">
                           <MagnifyingGlassIcon className="w-4 h-4" />
-                          <span>Run Scenario</span>
+                          <span>Run Advanced Scenario</span>
                         </span>
                       )}
                     </button>
@@ -302,7 +302,7 @@ const DiagnosticsPage: React.FC = () => {
                 {/* Query Results */}
                 <div>
                   <h3 className="text-lg font-medium text-win11-text-primary mb-4">
-                    Scenario Results
+                    Advanced Scenario Results
                   </h3>
                   {loadingSession && <div className="text-xs text-win11-text-tertiary mb-2">Loading session…</div>}
                   
@@ -350,14 +350,14 @@ const DiagnosticsPage: React.FC = () => {
         <div className="lg:col-span-1">
           <div className="win11-card p-6">
             <h3 className="text-lg font-medium text-win11-text-primary mb-4">
-              Recent Scenarios
+              Recent Advanced Scenarios
             </h3>
             
             {recentSessions.length === 0 ? (
               <div className="text-center py-8">
                 <ClockIcon className="w-12 h-12 text-win11-text-tertiary mx-auto mb-3" />
                 <p className="text-win11-text-tertiary text-sm">
-                  No recent scenarios
+                  No recent advanced scenarios
                 </p>
               </div>
             ) : (
@@ -392,16 +392,16 @@ const DiagnosticsPage: React.FC = () => {
                     )}
                     <button
                       onClick={async () => {
-                        if (confirm('Are you sure you want to delete all scenarios? This cannot be undone.')) {
+                        if (confirm('Are you sure you want to delete all advanced scenarios? This cannot be undone.')) {
                           try {
                             await diagnosticsService.deleteAllSessions(user!.id)
                             await loadRecentSessions()
                             setSelectedSessions(new Set())
-                            toast.success('All scenarios deleted successfully')
+                            toast.success('All advanced scenarios deleted successfully')
                           } catch (error) {
                             const err: any = error
                             console.error('Delete all sessions error:', err)
-                            toast.error(`Failed to delete all scenarios: ${err?.response?.data?.detail || err?.message}`)
+                            toast.error(`Failed to delete all advanced scenarios: ${err?.response?.data?.detail || err?.message}`)
                           }
                         }
                       }}
@@ -559,4 +559,4 @@ const DiagnosticsPage: React.FC = () => {
   )
 }
 
-export default DiagnosticsPage
+export default AdvancedScenariosPage

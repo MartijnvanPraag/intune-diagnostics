@@ -5,6 +5,7 @@ import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
 import SettingsPage from './pages/SettingsPage'
 import DiagnosticsPage from './pages/DiagnosticsPage'
+import AdvancedScenariosPage from './pages/AdvancedScenariosPage'
 import ChatPage from './pages/ChatPage'
 import { AuthProvider } from './contexts/AuthContext'
 
@@ -20,6 +21,8 @@ function App() {
               <Route path="settings" element={<SettingsPage />} />
               <Route path="diagnostics" element={<DiagnosticsPage />} />
               <Route path="scenarios" element={<DiagnosticsPage />} />
+              <Route path="scenarios/simple" element={<DiagnosticsPage />} />
+              <Route path="scenarios/advanced" element={<AdvancedScenariosPage />} />
               <Route path="chat" element={<ChatPage />} />
             </Route>
           </Routes>
