@@ -27,6 +27,8 @@ const AdvancedScenariosPage: React.FC = () => {
     context_id?: string
     policy_id?: string
     effective_group_id?: string
+    start_time?: string
+    end_time?: string
   }>()
 
   const watchedQueryType = watch('query_type')
@@ -124,15 +126,52 @@ const AdvancedScenariosPage: React.FC = () => {
   const onSubmit = async (data: any) => {
     if (!selectedQueryType) return
 
+    // Basic validation for device_timeline specific params
+    if (selectedQueryType.id === 'device_timeline') {
+      const st = data.start_time
+      const et = data.end_time
+      if (!st || !et) {
+        toast.error('Start and End time are required')
+        return
+      }
+      const startDate = new Date(st)
+      const endDate = new Date(et)
+      if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+        toast.error('Invalid date/time format')
+        return
+      }
+      if (endDate <= startDate) {
+        toast.error('End time must be after Start time')
+        return
+      }
+    }
+
     try {
       setLoading(true)
       setResult(null)
 
       // Build parameters based on query type requirements
       const parameters: Record<string, any> = {}
-      selectedQueryType.required_params.forEach(param => {
-        if (data[param]) {
-          parameters[param.replace('_', '')] = data[param] // Remove underscores for backend
+      selectedQueryType.required_params.forEach((param: string) => {
+        const value = (data as any)[param]
+        if (value !== undefined && value !== '') {
+          // Legacy simple scenarios expected device_id/account_id/context_id with underscore stripped in backend parameters
+          if (['device_id','account_id','context_id'].includes(param)) {
+            parameters[param.replace('_','')] = value
+          } else {
+            // Preserve underscore names for advanced timeline fields (start_time, end_time)
+            if (param === 'start_time' || param === 'end_time') {
+              // Convert datetime-local (browser local) to ISO 8601 UTC if possible
+              const dt = new Date(value)
+              if (!isNaN(dt.getTime())) {
+                parameters[param] = dt.toISOString()
+              } else {
+                parameters[param] = value
+              }
+            } else {
+              parameters[param] = value
+            }
+          }
         }
       })
 
@@ -273,6 +312,34 @@ const AdvancedScenariosPage: React.FC = () => {
                         />
                         {errors.context_id && (
                           <p className="text-red-500 text-xs mt-1">{errors.context_id.message}</p>
+                        )}
+                      </div>
+                    )}
+
+                    {selectedQueryType.required_params.includes('start_time') && (
+                      <div>
+                        <label className="block text-sm font-medium text-win11-text-primary mb-2">Start Time</label>
+                        <input
+                          type="datetime-local"
+                          {...register('start_time', { required: 'Start time is required' })}
+                          className="win11-input w-full"
+                        />
+                        {errors.start_time && (
+                          <p className="text-red-500 text-xs mt-1">{errors.start_time.message}</p>
+                        )}
+                      </div>
+                    )}
+
+                    {selectedQueryType.required_params.includes('end_time') && (
+                      <div>
+                        <label className="block text-sm font-medium text-win11-text-primary mb-2">End Time</label>
+                        <input
+                          type="datetime-local"
+                          {...register('end_time', { required: 'End time is required' })}
+                          className="win11-input w-full"
+                        />
+                        {errors.end_time && (
+                          <p className="text-red-500 text-xs mt-1">{errors.end_time.message}</p>
                         )}
                       </div>
                     )}

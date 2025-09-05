@@ -403,6 +403,13 @@ async def get_available_query_types():
                 "scenario_type": "advanced"
             },
             {
+                "id": "device_timeline",
+                "name": "Device Timeline",
+                "description": "Aggregate key device events (compliance, policy, app installs, check-ins) over a selected time window",
+                "required_params": ["device_id", "start_time", "end_time"],
+                "scenario_type": "advanced"
+            },
+            {
                 "id": "user_lookup",
                 "name": "User Lookup",
                 "description": "Find user IDs associated with the device",
