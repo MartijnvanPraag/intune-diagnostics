@@ -6,7 +6,7 @@ import subprocess
 import time
 import logging
 import re
-from typing import Dict, Any, List, Optional, Iterable
+from typing import Dict, Any, List, Optional, Iterable, Tuple
 from mcp.client.session import ClientSession
 from mcp.client.stdio import stdio_client, StdioServerParameters
 from mcp import types
@@ -206,6 +206,83 @@ class KustoMCPService:
         self._exit_stack = None
         self._session = None
         self.is_initialized = False
+
+    async def prewarm_tokens(self, queries: List[str]) -> None:
+        """Attempt to pre-acquire access tokens for clusters referenced in queries.
+
+        Extracts cluster("<cluster>").database("<db>") patterns and asks AuthService for tokens
+        so that interactive auth (WAM) happens once at startup instead of per scenario.
+        """
+        pattern = r"cluster\([\"']([^\"']+)[\"']\)\.database\([\"']([^\"']+)[\"']\)"
+        seen: set[tuple[str, str]] = set()
+        from services.auth_service import auth_service
+        for q in queries:
+            try:
+                m = re.search(pattern, q)
+                if not m:
+                    continue
+                cluster_url, database = m.group(1), m.group(2)
+                key = (cluster_url, database)
+                if key in seen:
+                    continue
+                seen.add(key)
+                # Normalize cluster URL and request token (cached in AuthService)
+                if not re.match(r"^https?://", cluster_url, re.IGNORECASE):
+                    cluster_url_norm = f"https://{cluster_url.strip()}".rstrip('/')
+                else:
+                    cluster_url_norm = cluster_url.rstrip('/')
+                try:
+                    await auth_service.get_kusto_token(cluster_url_norm)
+                    logger.info(f"Prewarmed Kusto token for {cluster_url_norm} / {database}")
+                except Exception as token_err:  # noqa: BLE001
+                    logger.warning(f"Failed to prewarm token for {cluster_url_norm}: {token_err}")
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"Prewarm parsing error ignored: {e}")
+        if not seen:
+            logger.info("No cluster/database patterns found during token prewarm")
+
+    async def prewarm_mcp_sessions(self, cluster_db_pairs: List[Tuple[str, str]]) -> None:
+        """Trigger lightweight MCP tool calls per cluster/database to force Node-side auth once.
+
+        Uses only 'list_tables' if available. No fallback query to avoid extra auth prompts.
+        """
+        if not cluster_db_pairs:
+            logger.info("No cluster/database pairs provided for MCP session prewarm")
+            return
+        if not self.is_initialized:
+            await self.initialize()
+        if not self._session:
+            logger.warning("Cannot prewarm MCP sessions: session not available")
+            return
+        # Determine available tools (refresh if empty)
+        try:
+            if not self._tool_names:
+                tool_list = await self._session.list_tools()
+                self._tool_names = [t.name for t in getattr(tool_list, "tools", [])]
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Tool list refresh failed during prewarm: {e}")
+
+        if "list_tables" not in self._tool_names:
+            logger.info("Skipping prewarm: 'list_tables' tool not available yet")
+            return
+
+        # Deduplicate by cluster only (one auth prompt per cluster)
+        seen_clusters: set[str] = set()
+        for cluster_url, database in cluster_db_pairs:
+            # Normalize cluster URL for uniqueness
+            if not re.match(r"^https?://", cluster_url, re.IGNORECASE):
+                cluster_url_norm = f"https://{cluster_url.strip()}".rstrip('/')
+            else:
+                cluster_url_norm = cluster_url.rstrip('/')
+            host_key = cluster_url_norm.lower()
+            if host_key in seen_clusters:
+                continue
+            seen_clusters.add(host_key)
+            try:
+                await self._session.call_tool("list_tables", {"clusterUrl": cluster_url_norm, "database": database})
+                logger.info(f"MCP prewarm list_tables (single per cluster) success: {cluster_url_norm}")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"MCP prewarm list_tables failed for {cluster_url_norm}: {e}")
 # Global MCP service instance
 kusto_mcp_service: Optional[KustoMCPService] = None
 

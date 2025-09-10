@@ -183,10 +183,42 @@ class AgentService:
     
     @classmethod
     async def initialize(cls) -> None:
-        """Initialize the global agent service"""
+        """Initialize the global agent service and eagerly start MCP server"""
         global agent_service
         agent_service = cls()
         await agent_service._load_instructions()
+        # Eagerly spin up MCP server so auth is handled once at startup
+        try:
+            from services.kusto_mcp_service import get_kusto_service
+            kusto_service = await get_kusto_service()
+            logger.info("Eager MCP server initialization completed during AgentService startup")
+            # Extract cluster/database pairs for a single list_tables prewarm per cluster
+            try:
+                all_queries: list[str] = []
+                for sc in agent_service.scenarios:
+                    all_queries.extend(sc.get("queries", []))
+                if all_queries:
+                    import re
+                    pair_pattern = r"cluster\([\"']([^\"']+)[\"']\)\.database\([\"']([^\"']+)[\"']\)"
+                    cluster_db_pairs: list[tuple[str, str]] = []
+                    seen_pairs: set[tuple[str, str]] = set()
+                    for q in all_queries:
+                        m = re.search(pair_pattern, q)
+                        if m:
+                            pair = (m.group(1), m.group(2))
+                            if pair not in seen_pairs:
+                                seen_pairs.add(pair)
+                                cluster_db_pairs.append(pair)
+                    if cluster_db_pairs:
+                        await kusto_service.prewarm_mcp_sessions(cluster_db_pairs)
+                    else:
+                        logger.info("No cluster/database pairs found for MCP session prewarm")
+                else:
+                    logger.info("No queries found for MCP prewarm")
+            except Exception as prewarm_err:  # noqa: BLE001
+                logger.warning(f"MCP session prewarm encountered issues: {prewarm_err}")
+        except Exception as mcp_init_err:  # noqa: BLE001
+            logger.warning(f"Eager MCP initialization failed (will lazy-init on first use): {mcp_init_err}")
     
     @classmethod
     async def cleanup(cls) -> None:

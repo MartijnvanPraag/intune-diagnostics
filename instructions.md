@@ -548,7 +548,7 @@ cluster("intune.kusto.windows.net").database("intune").HighLevelCheckin(deviceId
 // Raw IntuneEvent slice for the device/time range (broad telemetry correlation)
 cluster("intune.kusto.windows.net").database("intune").IntuneEvent
 | where DeviceId == '<DeviceId>'
-| where TimeGenerated between (datetime(<StartTime>) .. datetime(<EndTime>))
+| where env_time between (datetime(<StartTime>) .. datetime(<EndTime>))
 ```
 
 ```kusto
