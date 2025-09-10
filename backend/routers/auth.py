@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 from models.database import User
 from models.schemas import User as UserSchema, UserCreate
 from services.auth_service import auth_service
@@ -37,13 +37,23 @@ async def register_user(user_data: UserCreate, db: AsyncSession = Depends(get_db
         existing_user = result.scalar_one_or_none()
         
         if existing_user:
-            # Update existing user
-            existing_user.email = user_data.email
-            existing_user.display_name = user_data.display_name
-            existing_user.is_active = True
+            # Update existing user using SQLAlchemy update statement
+            await db.execute(
+                update(User)
+                .where(User.azure_user_id == user_data.azure_user_id)
+                .values(
+                    email=user_data.email,
+                    display_name=user_data.display_name,
+                    is_active=True
+                )
+            )
             await db.commit()
-            await db.refresh(existing_user)
-            return existing_user
+            # Fetch the updated user
+            result = await db.execute(
+                select(User).where(User.azure_user_id == user_data.azure_user_id)
+            )
+            updated_user = result.scalar_one()
+            return updated_user
         else:
             # Create new user
             new_user = User(
