@@ -586,15 +586,62 @@ class AgentService:
                     "summary": scenario_run.get("summary"),
                     "errors": scenario_run.get("errors", []),
                 }
-
-            query_message = f"Please execute a {query_type} query with the following parameters: {parameters}"
+            # Specialized prompt for device_timeline to force a mermaid timeline output
+            if query_type == "device_timeline":
+                device_id = parameters.get("device_id") or parameters.get("deviceid") or parameters.get("device")
+                start_time = parameters.get("start_time") or parameters.get("start")
+                end_time = parameters.get("end_time") or parameters.get("end")
+                timeline_instructions = (
+                    "You are an Intune diagnostics expert. Build a chronological device event timeline covering compliance status changes, policy assignment or evaluation outcomes, application install attempts (success/failure), device check-ins (including failures or long gaps), enrollment/sync events, and notable error events for the specified device and time window.\n"
+                    "1. Discover and aggregate relevant events via available tools / queries.\n"
+                    "2. Normalize timestamps to UTC ISO8601 (YYYY-MM-DD HH:MM).\n"
+                    "3. Group logically similar rapid events but keep important state transitions explicit.\n"
+                    "4. Output a concise narrative summary first (outside code fence).\n"
+                    "5. Then output EXACTLY ONE fenced mermaid code block using the 'timeline' syntax:```mermaid\\ntimeline\nTitle: Device Timeline (DEVICE_ID)\nStart: <earliest timestamp>\n<YYYY-MM-DD HH:MM>: <Category> - <Brief description>\n...\n```\n"
+                    "Rules: \n- Do not include any other fenced mermaid blocks.\n- Categories: Compliance, Policy, App, Check-in, Error, Enrollment, Other.\n- Limit to <= 60 events focusing on impactful changes.\n- If no events found, still return an empty timeline code block with a 'No significant events' note.\n"
+                )
+                query_message = (
+                    f"{timeline_instructions}\nParameters: device_id={device_id}, start_time={start_time}, end_time={end_time}. Return narrative then the mermaid block."  # noqa: E501
+                )
+            else:
+                query_message = f"Please execute a {query_type} query with the following parameters: {parameters}"
             team_result = await self.magentic_one_team.run(task=query_message)
             if not (hasattr(team_result, 'messages') and team_result.messages):
                 raise Exception("No response from Magentic One team")
 
             last_message = team_result.messages[-1]
             response_content = getattr(last_message, 'content', str(last_message))
+            # Extract mermaid timeline if requested
+            mermaid_block: str | None = None
+            if query_type == "device_timeline":
+                import re
+                pattern = re.compile(r"```mermaid\s+([\s\S]*?)```", re.IGNORECASE)
+                for m in reversed(team_result.messages):  # search from end backwards
+                    txt = getattr(m, 'content', '') or ''
+                    if not isinstance(txt, str):
+                        continue
+                    match = pattern.search(txt)
+                    if match:
+                        mermaid_block = match.group(1).strip()
+                        break
+                # Heuristic fallback if model omitted fencing
+                if not mermaid_block and isinstance(response_content, str) and "timeline" in response_content.lower():
+                    lines = response_content.splitlines()
+                    collected: list[str] = []
+                    capture = False
+                    for ln in lines:
+                        if ln.strip().lower().startswith("timeline"):
+                            capture = True
+                            collected.append("timeline")
+                            continue
+                        if capture:
+                            if ln.strip().startswith("```"):
+                                break
+                            collected.append(ln)
+                    if len(collected) > 1:
+                        mermaid_block = "\n".join(collected).strip()
 
+            # Standard JSON/table extraction
             extracted_objs: list[Any] = []
             for m in team_result.messages:  # type: ignore[attr-defined]
                 msg_text = getattr(m, 'content', '') or ''
@@ -609,6 +656,15 @@ class AgentService:
             if unique_tables:
                 logger.debug(f"[query_diagnostics] Total tables after normalization: {len(unique_tables)}")
 
+            # Add synthetic mermaid table if we captured a block
+            if mermaid_block:
+                mermaid_table = {"columns": ["mermaid_timeline"], "rows": [[mermaid_block]], "total_rows": 1}
+                if unique_tables:
+                    unique_tables = unique_tables + [mermaid_table]
+                else:
+                    unique_tables = [mermaid_table]
+                response_content = response_content + "\n\n[Mermaid timeline extracted successfully]"
+
             return {
                 "query_type": query_type,
                 "parameters": parameters,
@@ -616,6 +672,7 @@ class AgentService:
                 "team_execution": True,
                 "summary": response_content or f"Executed {query_type} query via Magentic One team",
                 "tables": unique_tables if unique_tables else None,
+                "mermaid_timeline": mermaid_block,
             }
         except Exception as e:
             error_msg = str(e) if str(e) else f"Unknown error of type {type(e).__name__}"

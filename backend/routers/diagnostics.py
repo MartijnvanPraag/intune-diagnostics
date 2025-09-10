@@ -287,6 +287,9 @@ async def execute_diagnostic_query(
                         tables_list.append(t)
                 if tables_list:
                     table_data = tables_list[0]
+            # Note: for the 'device_timeline' advanced scenario, the agent_service injects a synthetic table
+            # with a single column 'mermaid_timeline' containing the mermaid timeline diagram contents. The
+            # frontend can detect this column and render the diagram later (rendering not implemented yet).
 
             return AgentResponse(
                 response=result_data.get("summary", "Query executed successfully"),
