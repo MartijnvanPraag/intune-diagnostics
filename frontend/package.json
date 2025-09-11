@@ -12,18 +12,19 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-router-dom": "^6.20.0",
-    "axios": "^1.6.0",
-    "@tanstack/react-table": "^8.11.0",
     "@headlessui/react": "^1.7.17",
     "@heroicons/react": "^2.0.18",
+    "@tanstack/react-table": "^8.11.0",
+    "axios": "^1.6.0",
     "clsx": "^2.0.0",
-    "tailwindcss": "^3.3.6",
+    "lucide-react": "^0.294.0",
+    "mermaid": "^10.9.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "react-hook-form": "^7.48.0",
     "react-hot-toast": "^2.4.1",
-    "lucide-react": "^0.294.0"
+    "react-router-dom": "^6.20.0",
+    "tailwindcss": "^3.3.6"
   },
   "devDependencies": {
     "@types/react": "^18.3.0",

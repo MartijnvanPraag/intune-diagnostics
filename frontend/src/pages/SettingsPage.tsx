@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
 import { settingsService, ModelConfiguration, ModelConfigurationCreate } from '@/services/settingsService'
 import ModelConfigForm from '@/components/ModelConfigForm'
-import { PlusIcon, PencilIcon, TrashIcon, StarIcon } from '@heroicons/react/24/outline'
+import { PlusIcon, PencilIcon, TrashIcon } from '@heroicons/react/24/outline'
 import { StarIcon as StarSolidIcon } from '@heroicons/react/24/solid'
 import toast from 'react-hot-toast'
 

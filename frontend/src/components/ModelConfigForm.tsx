@@ -24,8 +24,7 @@ const ModelConfigForm: React.FC<ModelConfigFormProps> = ({
   const {
     register,
     handleSubmit,
-    formState: { errors },
-    watch
+    formState: { errors }
   } = useForm<ModelConfigurationCreate>({
     defaultValues: {
       user_id: userId,
