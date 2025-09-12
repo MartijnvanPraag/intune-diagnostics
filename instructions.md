@@ -77,16 +77,6 @@ Refer to these enum values for Policy / Payload status:
 
 
 
-### ICM details
-
-
-
-```kusto
-cluster("icmcluster.kusto.windows.net").database("IcMDataWarehouse").
-Incidents
-| where OwningTenantName == "Microsoft Intune"
-```
-
 ### Application Enforcement Status Legend
 
 The following legend augments application status outputs:

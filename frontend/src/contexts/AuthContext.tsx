@@ -12,8 +12,8 @@ interface User {
 interface AuthContextType {
   user: User | null
   isLoading: boolean
-  login: () => Promise<void>
-  logout: () => void
+  login: (forceInteractive?: boolean) => Promise<void>
+  logout: () => Promise<void>
   isAuthenticated: boolean
 }
 
@@ -55,10 +55,10 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     }
   }
 
-  const login = async () => {
+  const login = async (forceInteractive: boolean = false) => {
     try {
       setIsLoading(true)
-      const authResult = await authService.login()
+      const authResult = await authService.login(forceInteractive)
       
       // Register user in database
       const user = await authService.registerUser({
@@ -77,10 +77,19 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     }
   }
 
-  const logout = () => {
-    setUser(null)
-    localStorage.removeItem('user')
-    localStorage.removeItem('access_token')
+  const logout = async () => {
+    try {
+      // Call backend logout to clear server-side cache
+      await authService.logout()
+    } catch (error) {
+      // Continue with logout even if backend fails
+      console.warn('Backend logout failed:', error)
+    } finally {
+      // Always clear frontend state
+      setUser(null)
+      localStorage.removeItem('user')
+      localStorage.removeItem('access_token')
+    }
   }
 
   const value: AuthContextType = {

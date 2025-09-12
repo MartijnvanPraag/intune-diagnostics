@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from models.database import User
@@ -10,10 +10,10 @@ router = APIRouter()
 from dependencies import get_db
 
 @router.post("/login")
-async def login():
+async def login(force_interactive: bool = Query(False)):
     """Initiate Azure interactive authentication"""
     try:
-        auth_result = await auth_service.authenticate_user()
+        auth_result = await auth_service.authenticate_user(force_interactive=force_interactive)
         return {
             "status": "success",
             "message": "Authentication successful",
@@ -25,6 +25,18 @@ async def login():
         }
     except Exception as e:
         raise HTTPException(status_code=401, detail=f"Authentication failed: {str(e)}")
+
+@router.post("/logout")
+async def logout():
+    """Sign out user and clear authentication cache"""
+    try:
+        auth_service.sign_out()
+        return {
+            "status": "success",
+            "message": "Successfully signed out"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Logout failed: {str(e)}")
 
 @router.post("/register", response_model=UserSchema)
 async def register_user(user_data: UserCreate, db: AsyncSession = Depends(get_db)):

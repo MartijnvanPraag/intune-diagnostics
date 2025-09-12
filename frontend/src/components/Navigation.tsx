@@ -141,7 +141,13 @@ const Navigation: React.FC = () => {
         </div>
         
         <button
-          onClick={logout}
+          onClick={async () => {
+            try {
+              await logout()
+            } catch (error) {
+              console.error('Logout failed:', error)
+            }
+          }}
           className="flex items-center space-x-2 w-full px-3 py-2 text-sm text-win11-text-secondary hover:text-win11-text-primary hover:bg-win11-surfaceHover rounded-win11-small transition-all duration-150"
         >
           <ArrowRightOnRectangleIcon className="w-4 h-4" />

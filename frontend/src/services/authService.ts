@@ -30,9 +30,18 @@ export interface UserCreate {
 }
 
 class AuthService {
-  async login(): Promise<LoginResponse> {
-    const response = await axios.post(`${API_BASE_URL}/auth/login`)
+  async login(forceInteractive: boolean = false): Promise<LoginResponse> {
+    const response = await axios.post(`${API_BASE_URL}/auth/login?force_interactive=${forceInteractive}`)
     return response.data
+  }
+
+  async logout(): Promise<void> {
+    try {
+      await axios.post(`${API_BASE_URL}/auth/logout`)
+    } catch (error) {
+      // Continue with logout even if backend call fails
+      console.warn('Backend logout failed, continuing with local logout:', error)
+    }
   }
 
   async registerUser(userData: UserCreate): Promise<User> {

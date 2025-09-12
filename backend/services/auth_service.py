@@ -134,9 +134,13 @@ class AuthService:
             
             return response.json()
     
-    async def authenticate_user(self) -> dict:
+    async def authenticate_user(self, force_interactive: bool = False) -> dict:
         """Complete authentication flow and return user info"""
         try:
+            # If forcing interactive auth, clear the cache first
+            if force_interactive:
+                self.clear_token_cache()
+            
             # Get Microsoft Graph token for user info
             graph_token = await self.get_graph_token()
             user_info = await self.get_user_info(graph_token)
@@ -149,6 +153,37 @@ class AuthService:
             }
         except Exception as e:
             raise Exception(f"Authentication process failed: {str(e)}")
+    
+    def clear_token_cache(self):
+        """Clear all cached tokens to force fresh authentication"""
+        self._token_cache.clear()
+        print("Token cache cleared - next authentication will be interactive")
+    
+    def sign_out(self):
+        """Sign out user by clearing token cache and invalidating cached credentials"""
+        self.clear_token_cache()
+        
+        # Try to clear the credential cache as well
+        try:
+            # For WAM credential, we need to create a new instance to clear cached state
+            self.wam_credential = InteractiveBrowserCredential(
+                enable_support_for_broker=True,
+                parent_window_handle=None,
+                disable_automatic_authentication=False,
+            )
+            
+            # Recreate token providers with fresh credential
+            self.cognitive_token_provider = get_bearer_token_provider(
+                self.wam_credential, 
+                self.cognitive_services_scope
+            )
+            self.graph_token_provider = get_bearer_token_provider(
+                self.wam_credential,
+                self.graph_scope
+            )
+            print("User signed out - credential cache cleared")
+        except Exception as e:
+            print(f"Warning: Could not fully clear credential cache: {e}")
 
 # Global auth service instance
 auth_service = AuthService()
