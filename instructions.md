@@ -93,7 +93,6 @@ The following legend augments application status outputs:
 
 Capture the device details for the provided `<DeviceId>` and summarize key fields (DeviceId, AccountId, PrimaryUser/EnrolledByUser, OSVersion, LastContact, SerialNumber, DeviceName, AzureAdDeviceId). This is the ONLY query you run for the device_details scenario. 
 
-
 ```kusto
 let DeviceID = '<DeviceId>';
 let base_query = (cluster: string, source: string) {
