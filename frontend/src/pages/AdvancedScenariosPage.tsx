@@ -366,32 +366,7 @@ const AdvancedScenariosPage: React.FC = () => {
               </form>
             ) : (
               <div className="space-y-6">
-                {/* Query Results */}
-                <div>
-                  <h3 className="text-lg font-medium text-win11-text-primary mb-4">
-                    Advanced Scenario Results
-                  </h3>
-                  {loadingSession && <div className="text-xs text-win11-text-tertiary mb-2">Loading session…</div>}
-                  
-                  {result.tables && result.tables.length > 0 ? (
-                    <div className="space-y-6">
-                      {result.tables.map((t, i) => (
-                        <DataTable key={i} data={t} title={i === 0 ? undefined : `Table ${i+1}`} />
-                      ))}
-                    </div>
-                  ) : result.table_data ? (
-                    <DataTable data={result.table_data} />
-                  ) : (
-                    <div className="win11-card p-4">
-                      <div className="flex items-center space-x-2 text-win11-text-tertiary">
-                        <ExclamationTriangleIcon className="w-5 h-5" />
-                        <span>No table data available</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* AI Summary */}
+                {/* AI Summary - Always displayed first */}
                 <div>
                   <h3 className="text-lg font-medium text-win11-text-primary mb-4">
                     AI Insight Summary
@@ -403,6 +378,62 @@ const AdvancedScenariosPage: React.FC = () => {
                       </p>
                     </div>
                   </div>
+                </div>
+
+                {/* Mermaid Timeline Diagrams - Displayed right after AI Summary for any scenario */}
+                {result.tables && result.tables.length > 0 && (() => {
+                  const mermaidTables = result.tables.filter(t => 
+                    t.columns && t.columns.length === 1 && 
+                    t.columns[0].toLowerCase() === 'mermaid_timeline'
+                  );
+                  
+                  return mermaidTables.length > 0 && (
+                    <div className="space-y-6">
+                      {mermaidTables.map((t, i) => (
+                        <div key={`mermaid-${i}`}>
+                          <h3 className="text-lg font-medium text-win11-text-primary mb-4">
+                            Device Timeline Diagram
+                          </h3>
+                          <DataTable data={t} />
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+
+                {/* Kusto Query Results - Displayed last */}
+                <div>
+                  <h3 className="text-lg font-medium text-win11-text-primary mb-4">
+                    Kusto Query Results
+                  </h3>
+                  {loadingSession && <div className="text-xs text-win11-text-tertiary mb-2">Loading session…</div>}
+                  
+                  {result.tables && result.tables.length > 0 ? (
+                    <div className="space-y-6">
+                      {result.tables
+                        .filter(t => {
+                          // Exclude mermaid tables as they're shown separately above
+                          return !(t.columns && t.columns.length === 1 && 
+                                 t.columns[0].toLowerCase() === 'mermaid_timeline');
+                        })
+                        .map((t, i) => (
+                          <DataTable key={i} data={t} title={i === 0 ? undefined : `Table ${i+1}`} />
+                        ))
+                      }
+                    </div>
+                  ) : result.table_data && 
+                      !(result.table_data.columns && 
+                        result.table_data.columns.length === 1 && 
+                        result.table_data.columns[0].toLowerCase() === 'mermaid_timeline') ? (
+                    <DataTable data={result.table_data} />
+                  ) : (
+                    <div className="win11-card p-4">
+                      <div className="flex items-center space-x-2 text-win11-text-tertiary">
+                        <ExclamationTriangleIcon className="w-5 h-5" />
+                        <span>No table data available</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <div className="text-xs text-win11-text-tertiary">

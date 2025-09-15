@@ -30,8 +30,8 @@ export interface UserCreate {
 }
 
 class AuthService {
-  async login(forceInteractive: boolean = false): Promise<LoginResponse> {
-    const response = await axios.post(`${API_BASE_URL}/auth/login?force_interactive=${forceInteractive}`)
+  async login(): Promise<LoginResponse> {
+    const response = await axios.post(`${API_BASE_URL}/auth/login`)
     return response.data
   }
 

@@ -91,19 +91,18 @@ The following legend augments application status outputs:
 
 ### Device Details
 
-Capture the device details for the provided `<DeviceId>` and summarize key fields (DeviceId, AccountId, PrimaryUser/EnrolledByUser, OSVersion, LastContact, SerialNumber, DeviceName, AzureAdDeviceId). 
+Capture the device details for the provided `<DeviceId>` and summarize key fields (DeviceId, AccountId, PrimaryUser/EnrolledByUser, OSVersion, LastContact, SerialNumber, DeviceName, AzureAdDeviceId). This is the ONLY query you run for the device_details scenario. 
 
 
 ```kusto
-// US region fallback
-cluster("qrybkradxus01pe.westus2.kusto.windows.net").database("qrybkradxglobaldb").Device_Snapshot()
-| where DeviceId == "<DeviceId>"
-```
-
-```kusto
-// EU region fallback
-cluster("qrybkradxeu01pe.northeurope.kusto.windows.net").database("qrybkradxglobaldb").Device_Snapshot()
-| where DeviceId == "<DeviceId>"
+let DeviceID = '<DeviceId>';
+let base_query = (cluster: string, source: string) {
+    cluster(cluster).database("qrybkradxglobaldb").Device_Snapshot()
+        | where DeviceId == DeviceID
+};
+union
+   base_query('qrybkradxeu01pe.northeurope', 'europe'),  
+   base_query('qrybkradxus01pe.westus2', 'Non-EU')
 ```
 
 ### Enrollment Type Legend

@@ -299,32 +299,7 @@ const DiagnosticsPage: React.FC = () => {
               </form>
             ) : (
               <div className="space-y-6">
-                {/* Query Results */}
-                <div>
-                  <h3 className="text-lg font-medium text-win11-text-primary mb-4">
-                    Scenario Results
-                  </h3>
-                  {loadingSession && <div className="text-xs text-win11-text-tertiary mb-2">Loading session…</div>}
-                  
-                  {result.tables && result.tables.length > 0 ? (
-                    <div className="space-y-6">
-                      {result.tables.map((t, i) => (
-                        <DataTable key={i} data={t} title={i === 0 ? undefined : `Table ${i+1}`} />
-                      ))}
-                    </div>
-                  ) : result.table_data ? (
-                    <DataTable data={result.table_data} />
-                  ) : (
-                    <div className="win11-card p-4">
-                      <div className="flex items-center space-x-2 text-win11-text-tertiary">
-                        <ExclamationTriangleIcon className="w-5 h-5" />
-                        <span>No table data available</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* AI Summary */}
+                {/* AI Summary - Now displayed first */}
                 <div>
                   <h3 className="text-lg font-medium text-win11-text-primary mb-4">
                     AI Insight Summary
@@ -336,6 +311,49 @@ const DiagnosticsPage: React.FC = () => {
                       </p>
                     </div>
                   </div>
+                </div>
+
+                {/* Mermaid Timeline Diagrams - Displayed right after AI Summary */}
+                {result.tables && result.tables.length > 0 && (() => {
+                  const mermaidTables = result.tables.filter(t => 
+                    t.columns && t.columns.length === 1 && 
+                    t.columns[0].toLowerCase() === 'mermaid_timeline'
+                  );
+                  
+                  return mermaidTables.length > 0 && (
+                    <div className="space-y-6">
+                      {mermaidTables.map((t, i) => (
+                        <DataTable key={`mermaid-${i}`} data={t} title="Device Timeline Diagram" />
+                      ))}
+                    </div>
+                  );
+                })()}
+
+                {/* Query Results - Now displayed last */}
+                <div>
+                  <h3 className="text-lg font-medium text-win11-text-primary mb-4">
+                    Kusto Query Results
+                  </h3>
+                  {loadingSession && <div className="text-xs text-win11-text-tertiary mb-2">Loading session…</div>}
+                  
+                  {result.tables && result.tables.length > 0 ? (
+                    <div className="space-y-6">
+                      {result.tables
+                        .filter(t => !(t.columns && t.columns.length === 1 && t.columns[0].toLowerCase() === 'mermaid_timeline'))
+                        .map((t, i) => (
+                          <DataTable key={i} data={t} title={i === 0 ? undefined : `Table ${i+1}`} />
+                        ))}
+                    </div>
+                  ) : result.table_data ? (
+                    <DataTable data={result.table_data} />
+                  ) : (
+                    <div className="win11-card p-4">
+                      <div className="flex items-center space-x-2 text-win11-text-tertiary">
+                        <ExclamationTriangleIcon className="w-5 h-5" />
+                        <span>No table data available</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <div className="text-xs text-win11-text-tertiary">

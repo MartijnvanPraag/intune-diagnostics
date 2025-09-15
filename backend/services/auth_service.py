@@ -134,15 +134,14 @@ class AuthService:
             
             return response.json()
     
-    async def authenticate_user(self, force_interactive: bool = False) -> dict:
-        """Complete authentication flow and return user info"""
+    async def authenticate_user(self) -> dict:
+        """Complete authentication flow and return user info - always get fresh tokens"""
         try:
-            # If forcing interactive auth, clear the cache first
-            if force_interactive:
-                self.clear_token_cache()
+            # Always clear cache to ensure fresh authentication
+            self.clear_token_cache()
             
-            # Get Microsoft Graph token for user info
-            graph_token = await self.get_graph_token()
+            # Get Microsoft Graph token for user info with force refresh
+            graph_token = await self.get_access_token(self.graph_scope, force_refresh=True)
             user_info = await self.get_user_info(graph_token)
             
             return {
@@ -160,19 +159,31 @@ class AuthService:
         print("Token cache cleared - next authentication will be interactive")
     
     def sign_out(self):
-        """Sign out user by clearing token cache and invalidating cached credentials"""
-        self.clear_token_cache()
+        """Sign out user by clearing ALL token caches and invalidating cached credentials"""
+        # Clear our internal token cache for all scopes
+        self._token_cache.clear()
         
         # Try to clear the credential cache as well
         try:
-            # For WAM credential, we need to create a new instance to clear cached state
+            # Create new WAM credential instance to clear cached state
             self.wam_credential = InteractiveBrowserCredential(
                 enable_support_for_broker=True,
                 parent_window_handle=None,
                 disable_automatic_authentication=False,
             )
             
-            # Recreate token providers with fresh credential
+            # Also recreate the default credential to clear its cache
+            self.credential = DefaultAzureCredential(
+                exclude_azure_cli_credential=False,
+                exclude_azure_powershell_credential=False,
+                exclude_visual_studio_code_credential=False,
+                exclude_environment_credential=True,
+                exclude_managed_identity_credential=True,
+                exclude_interactive_browser_credential=False,
+                exclude_shared_token_cache_credential=False,
+            )
+            
+            # Recreate token providers with fresh credentials for all services
             self.cognitive_token_provider = get_bearer_token_provider(
                 self.wam_credential, 
                 self.cognitive_services_scope
@@ -181,9 +192,13 @@ class AuthService:
                 self.wam_credential,
                 self.graph_scope
             )
-            print("User signed out - credential cache cleared")
+            
+            print("User signed out - all credential caches cleared (Graph, Cognitive Services, Kusto)")
+            print(f"Cleared {len(self._token_cache)} cached tokens")
         except Exception as e:
             print(f"Warning: Could not fully clear credential cache: {e}")
+            # Still clear what we can
+            self._token_cache.clear()
 
 # Global auth service instance
 auth_service = AuthService()

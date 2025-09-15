@@ -12,7 +12,7 @@ interface User {
 interface AuthContextType {
   user: User | null
   isLoading: boolean
-  login: (forceInteractive?: boolean) => Promise<void>
+  login: () => Promise<void>
   logout: () => Promise<void>
   isAuthenticated: boolean
 }
@@ -55,10 +55,10 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     }
   }
 
-  const login = async (forceInteractive: boolean = false) => {
+  const login = async () => {
     try {
       setIsLoading(true)
-      const authResult = await authService.login(forceInteractive)
+      const authResult = await authService.login()
       
       // Register user in database
       const user = await authService.registerUser({

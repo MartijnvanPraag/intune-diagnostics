@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from models.database import User
@@ -10,10 +10,10 @@ router = APIRouter()
 from dependencies import get_db
 
 @router.post("/login")
-async def login(force_interactive: bool = Query(False)):
+async def login():
     """Initiate Azure interactive authentication"""
     try:
-        auth_result = await auth_service.authenticate_user(force_interactive=force_interactive)
+        auth_result = await auth_service.authenticate_user()
         return {
             "status": "success",
             "message": "Authentication successful",

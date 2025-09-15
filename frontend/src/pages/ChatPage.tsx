@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { diagnosticsService, ChatResponse, ChatSessionSummary } from '@/services/diagnosticsService'
 import { useAuth } from '@/contexts/AuthContext'
+import DataTable from '@/components/DataTable'
 
 interface ChatMessage {
   role: 'user' | 'agent'
@@ -25,6 +26,23 @@ const ChatPage: React.FC = () => {
   const [strictMode, setStrictMode] = useState<boolean>(() => {
     try { return localStorage.getItem('chat.strictMode') === 'true' } catch { return false }
   })
+
+  // Clarification handler
+  const handleClarificationSelection = (guid: string, needed: string[]) => {
+    // This will be replaced by improved UX: open a small selector mapping slot->guid.
+    // For now, naive: if only one slot needed set message prefill.
+    if (needed.length === 1) {
+      // Append structured hint
+      const slot = needed[0]
+      const textarea = document.querySelector('textarea') as HTMLTextAreaElement | null
+      if (textarea) {
+        textarea.value = `${slot}: ${guid}`
+        textarea.focus()
+      }
+    } else {
+      alert('Multiple slots need clarification; manual entry required: ' + needed.join(', '))
+    }
+  }
 
   const loadSessions = async () => {
     if (!user) return
@@ -222,55 +240,77 @@ const ChatPage: React.FC = () => {
                     className="px-2 py-1 border border-win11-border rounded hover:bg-win11-surfaceHover"
                   >All CSV</button>
                 </div>
-                {m.tables.map((t, ti) => (
-                  <div key={ti} className="overflow-x-auto border border-win11-border rounded">
-                    <div className="flex justify-between items-center px-2 py-1 bg-win11-surface text-[10px]">
-                      <span>Table {ti+1} ({t.rows.length} rows)</span>
-                      <div className="flex gap-1">
-                        <button
-                          onClick={() => {
-                            const esc = (v: any) => '"' + String(v).replace(/"/g,'""') + '"'
-                            const csv: string[] = [t.columns.map(esc).join(',')]
-                            t.rows.forEach(r => csv.push(r.map(esc).join(',')))
-                            const blob = new Blob([csv.join('\n')], { type: 'text/csv;charset=utf-8;' })
-                            const url = URL.createObjectURL(blob)
-                            const a = document.createElement('a')
-                            a.href = url
-                            a.download = `chat-${sessionId || 'session'}-message-${idx}-table-${ti+1}.csv`
-                            a.click(); URL.revokeObjectURL(url)
-                          }}
-                          className="px-2 py-0.5 border border-win11-border rounded hover:bg-win11-surfaceHover"
-                        >CSV</button>
-                        <button
-                          onClick={() => {
-                            const blob = new Blob([JSON.stringify(t, null, 2)], { type: 'application/json' })
-                            const url = URL.createObjectURL(blob)
-                            const a = document.createElement('a')
-                            a.href = url
-                            a.download = `chat-${sessionId || 'session'}-message-${idx}-table-${ti+1}.json`
-                            a.click(); URL.revokeObjectURL(url)
-                          }}
-                          className="px-2 py-0.5 border border-win11-border rounded hover:bg-win11-surfaceHover"
-                        >JSON</button>
-                      </div>
-                    </div>
-                    <table className="min-w-full text-xs">
-                      <thead className="bg-win11-surface">
-                        <tr>
-                          {t.columns.map(c => <th key={c} className="text-left px-2 py-1 font-medium border-b border-win11-border">{c}</th>)}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {t.rows.slice(0, 25).map((r, ri) => (
-                          <tr key={ri} className="odd:bg-win11-surfaceHover/40">
-                            {r.map((cell: any, ci: number) => <td key={ci} className="px-2 py-1 align-top border-b border-win11-border/50">{String(cell)}</td>)}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    {t.rows.length > 25 && <div className="text-xs text-win11-text-tertiary px-2 py-1">Showing first 25 / {t.rows.length} rows</div>}
-                  </div>
-                ))}
+                {/* Handle Device Timeline special case: show mermaid diagrams before other tables */}
+                {(() => {
+                  const mermaidTables = m.tables!.filter(t => 
+                    t.columns && t.columns.length === 1 && 
+                    t.columns[0].toLowerCase() === 'mermaid_timeline'
+                  );
+                  const regularTables = m.tables!.filter(t => 
+                    !(t.columns && t.columns.length === 1 && 
+                      t.columns[0].toLowerCase() === 'mermaid_timeline')
+                  );
+                  
+                  return (
+                    <>
+                      {/* Show mermaid diagrams first */}
+                      {mermaidTables.map((t, ti) => (
+                        <DataTable key={`mermaid-${ti}`} data={{...t, total_rows: t.total_rows || t.rows.length}} title="Device Timeline Diagram" />
+                      ))}
+                      
+                      {/* Show regular tables after mermaid diagrams */}
+                      {regularTables.map((t, ti) => (
+                        <div key={ti} className="overflow-x-auto border border-win11-border rounded">
+                          <div className="flex justify-between items-center px-2 py-1 bg-win11-surface text-[10px]">
+                            <span>Table {ti+1} ({t.rows.length} rows)</span>
+                            <div className="flex gap-1">
+                              <button
+                                onClick={() => {
+                                  const esc = (v: any) => '"' + String(v).replace(/"/g,'""') + '"'
+                                  const csv: string[] = [t.columns.map(esc).join(',')]
+                                  t.rows.forEach(r => csv.push(r.map(esc).join(',')))
+                                  const blob = new Blob([csv.join('\n')], { type: 'text/csv;charset=utf-8;' })
+                                  const url = URL.createObjectURL(blob)
+                                  const a = document.createElement('a')
+                                  a.href = url
+                                  a.download = `chat-${sessionId || 'session'}-message-${idx}-table-${ti+1}.csv`
+                                  a.click(); URL.revokeObjectURL(url)
+                                }}
+                                className="px-2 py-0.5 border border-win11-border rounded hover:bg-win11-surfaceHover"
+                              >CSV</button>
+                              <button
+                                onClick={() => {
+                                  const blob = new Blob([JSON.stringify(t, null, 2)], { type: 'application/json' })
+                                  const url = URL.createObjectURL(blob)
+                                  const a = document.createElement('a')
+                                  a.href = url
+                                  a.download = `chat-${sessionId || 'session'}-message-${idx}-table-${ti+1}.json`
+                                  a.click(); URL.revokeObjectURL(url)
+                                }}
+                                className="px-2 py-0.5 border border-win11-border rounded hover:bg-win11-surfaceHover"
+                              >JSON</button>
+                            </div>
+                          </div>
+                          <table className="min-w-full text-xs">
+                            <thead className="bg-win11-surface">
+                              <tr>
+                                {t.columns.map(c => <th key={c} className="text-left px-2 py-1 font-medium border-b border-win11-border">{c}</th>)}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {t.rows.slice(0, 25).map((r, ri) => (
+                                <tr key={ri} className="odd:bg-win11-surfaceHover/40">
+                                  {r.map((cell: any, ci: number) => <td key={ci} className="px-2 py-1 align-top border-b border-win11-border/50">{String(cell)}</td>)}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                          {t.rows.length > 25 && <div className="text-xs text-win11-text-tertiary px-2 py-1">Showing first 25 / {t.rows.length} rows</div>}
+                        </div>
+                      ))}
+                    </>
+                  );
+                })()}
               </div>
             )}
             {m.state && m.role === 'agent' && (
@@ -301,7 +341,7 @@ const ChatPage: React.FC = () => {
 
       {error && <div className="text-sm text-red-600 mb-2">{error}</div>}
 
-      <div className="border border-win11-border rounded-win11-small p-3 bg-win11-card shadow-win11 flex flex-col gap-2">
+      <div className="border border-win11-border rounded-win11-small p-3 bg-win11-card shadow-win11 flex flex-col gap-2 mt-4">
         <textarea
           value={input}
             onChange={e => setInput(e.target.value)}
@@ -323,23 +363,6 @@ const ChatPage: React.FC = () => {
       </div>
     </div>
   )
-}
-
-// Clarification handler outside component previously; define inside
-const handleClarificationSelection = (guid: string, needed: string[]) => {
-  // This will be replaced by improved UX: open a small selector mapping slot->guid.
-  // For now, naive: if only one slot needed set message prefill.
-  if (needed.length === 1) {
-    // Append structured hint
-    const slot = needed[0]
-    const textarea = document.querySelector('textarea') as HTMLTextAreaElement | null
-    if (textarea) {
-      textarea.value = `${slot}: ${guid}`
-      textarea.focus()
-    }
-  } else {
-    alert('Multiple slots need clarification; manual entry required: ' + needed.join(', '))
-  }
 }
 
 export default ChatPage

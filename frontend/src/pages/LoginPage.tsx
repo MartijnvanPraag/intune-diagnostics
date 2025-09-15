@@ -7,27 +7,19 @@ import toast from 'react-hot-toast'
 const LoginPage: React.FC = () => {
   const { login, isAuthenticated, isLoading } = useAuth()
   const [loggingIn, setLoggingIn] = useState(false)
-  const [showForceOption, setShowForceOption] = useState(false)
 
   if (isAuthenticated) {
     return <Navigate to="/" replace />
   }
 
-  const handleLogin = async (forceInteractive: boolean = false) => {
+  const handleLogin = async () => {
     try {
       setLoggingIn(true)
-      await login(forceInteractive)
+      await login()
       toast.success('Successfully authenticated!')
     } catch (error) {
       console.error('Login failed:', error)
-      
-      // If login failed and we haven't shown the force option yet, show it
-      if (!forceInteractive && !showForceOption) {
-        setShowForceOption(true)
-        toast.error(`Login failed: ${error instanceof Error ? error.message : 'Unknown error'}. Try "Force New Login" if you need to use a different account or clear cached credentials.`)
-      } else {
-        toast.error(`Login failed: ${error instanceof Error ? error.message : 'Unknown error'}`)
-      }
+      toast.error(`Login failed: ${error instanceof Error ? error.message : 'Unknown error'}`)
     } finally {
       setLoggingIn(false)
     }
@@ -64,7 +56,7 @@ const LoginPage: React.FC = () => {
 
           <div className="space-y-4">
             <button
-              onClick={() => handleLogin(false)}
+              onClick={() => handleLogin()}
               disabled={loggingIn}
               className="w-full win11-button disabled:opacity-50 disabled:cursor-not-allowed"
             >
@@ -78,31 +70,9 @@ const LoginPage: React.FC = () => {
               )}
             </button>
 
-            {showForceOption && (
-              <button
-                onClick={() => handleLogin(true)}
-                disabled={loggingIn}
-                className="w-full win11-button-secondary disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {loggingIn ? (
-                  <span className="flex items-center justify-center space-x-2">
-                    <div className="w-4 h-4 border-2 border-win11-primary border-t-transparent rounded-full animate-spin"></div>
-                    <span>Forcing new login...</span>
-                  </span>
-                ) : (
-                  'Force New Login'
-                )}
-              </button>
-            )}
-
             <div className="text-xs text-win11-text-tertiary text-center">
               This app uses Azure Active Directory for secure authentication.
               No credentials are stored locally.
-              {showForceOption && (
-                <div className="mt-2 p-2 bg-win11-warning-background border border-win11-warning rounded-win11-small">
-                  <strong>Force New Login:</strong> Use this if you need to sign in with a different account or clear cached credentials.
-                </div>
-              )}
             </div>
           </div>
         </div>
