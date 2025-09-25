@@ -66,10 +66,13 @@ def parse_instructions(markdown_text: str) -> List[Dict[str, Any]]:
         heading_match = SCENARIO_HEADING_PATTERN.match(line)
         if heading_match:
             title = heading_match.group(1).strip()
+            
+            # Clean up markdown formatting from titles
+            title = title.replace('**', '').replace('*', '').strip()
+            
             # Skip first overall title if no scenario yet and probably H1
             if current is None and line.startswith('# '):
-                current = InstructionScenario(title)
-                scenarios.append(current)
+                # Don't create a scenario for the main document title
                 continue
             # Start new scenario
             current = InstructionScenario(title)
@@ -105,6 +108,18 @@ def _is_probable_kusto(block: str) -> bool:
     text = block.strip()
     if not text:
         return False
-    indicators = ["|", "cluster(", "project ", "where ", "take ", "summarize ", "extend ", "datatable "]
-    score = sum(1 for i in indicators if i.lower() in text.lower())
+    
+    # Strong indicators that this is a Kusto query
+    strong_indicators = ["cluster(", "database("]
+    kusto_keywords = ["|", "project ", "where ", "take ", "summarize ", "extend ", "datatable ", "let ", "union ", "join "]
+    function_patterns = ["GetTenantInformation", "GetDeviceDetails", "StatusChanges", "Investigation"]
+    
+    # If it starts with cluster() call, it's almost certainly Kusto
+    if any(indicator in text for indicator in strong_indicators):
+        return True
+    
+    # Or if it has multiple Kusto keywords/patterns
+    score = sum(1 for i in kusto_keywords if i.lower() in text.lower())
+    score += sum(1 for p in function_patterns if p in text)
+    
     return score >= 2

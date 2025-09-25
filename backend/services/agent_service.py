@@ -18,8 +18,83 @@ from autogen_ext.auth.azure import AzureTokenProvider
 from autogen_ext.models.openai import AzureOpenAIChatCompletionClient
 from models.schemas import ModelConfiguration
 from services.auth_service import auth_service
-from services.instructions_parser import parse_instructions
+from services.scenario_lookup_service import get_scenario_service
 
+
+def create_scenario_lookup_function() -> Callable[..., Awaitable[str]]:
+    """Create a function for looking up scenarios from instructions.md"""
+    
+    async def lookup_scenarios(user_request: str, max_scenarios: int = 3) -> str:
+        """Look up relevant diagnostic scenarios based on user request"""
+        try:
+            scenario_service = get_scenario_service()
+            
+            # Log the user request for debugging
+            logger.info(f"Scenario lookup called with: '{user_request}'")
+            
+            # Find matching scenarios
+            matching_titles = scenario_service.find_scenarios_by_keywords(user_request, max_scenarios)
+            logger.info(f"Found matching scenarios: {matching_titles}")
+            
+            if not matching_titles:
+                return "No matching diagnostic scenarios found. Available scenarios: " + \
+                       ", ".join(scenario_service.list_all_scenario_titles())
+            
+            # Get detailed scenarios
+            scenarios = scenario_service.get_scenarios_by_titles(matching_titles)
+            
+            # Format response
+            response_parts = ["Found matching diagnostic scenarios:\n"]
+            
+            for i, scenario in enumerate(scenarios, 1):
+                response_parts.append(f"## {i}. {scenario.title}")
+                response_parts.append(f"**Description:** {scenario.description}")
+                response_parts.append("**Queries:**")
+                
+                for j, query in enumerate(scenario.queries, 1):
+                    response_parts.append(f"```kusto\n{query}\n```")
+                
+                response_parts.append("")  # Add spacing
+            
+            return "\n".join(response_parts)
+            
+        except Exception as e:
+            logger.error(f"Error in scenario lookup: {e}")
+            return f"Error looking up scenarios: {str(e)}"
+    
+    return lookup_scenarios
+
+def create_context_lookup_function() -> Callable[..., Awaitable[str]]:
+    """Create a function for looking up stored conversation context"""
+    
+    async def lookup_context(key: str = "") -> str:
+        """Look up stored conversation context values"""
+        try:
+            from services.conversation_state import get_conversation_state_service
+            
+            context_service = get_conversation_state_service()
+            
+            if key:
+                # Look up specific key
+                value = context_service.get_context_value(key)
+                if value:
+                    return f"Found {key}: {value}"
+                else:
+                    return f"No value found for key '{key}'. Available context: {list(context_service.get_all_context().keys())}"
+            else:
+                # Return all available context
+                all_context = context_service.get_all_context()
+                if all_context:
+                    context_lines = [f"{k}: {v}" for k, v in all_context.items()]
+                    return "Available conversation context:\n" + "\n".join(context_lines)
+                else:
+                    return "No conversation context available."
+                    
+        except Exception as e:
+            logger.error(f"Error in context lookup: {e}")
+            return f"Error looking up context: {str(e)}"
+    
+    return lookup_context
 
 def create_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[..., Awaitable[str]]:
     """Create an async function wrapper for an MCP tool"""
@@ -28,8 +103,10 @@ def create_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[
         """Execute the MCP tool with given parameters"""
         try:
             from services.kusto_mcp_service import get_kusto_service
+            from services.conversation_state import get_conversation_state_service
             
             kusto_service = await get_kusto_service()
+            context_service = get_conversation_state_service()
             
             # Handle nested kwargs structure from agent calls
             if "kwargs" in kwargs and isinstance(kwargs["kwargs"], dict):
@@ -48,6 +125,9 @@ def create_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[
                 query = actual_args.get("query")
                 
                 if cluster_url and database and query:
+                    # Substitute placeholders in query with stored context
+                    query = context_service.substitute_placeholders(query)
+                    
                     # Ensure clusterUrl has https:// prefix as required by MCP server
                     if not cluster_url.startswith(("https://", "http://")):
                         normalized_cluster_url = f"https://{cluster_url}"
@@ -55,7 +135,7 @@ def create_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[
                         normalized_cluster_url = cluster_url
                     
                     logger.info(f"Using cluster URL: {normalized_cluster_url}")
-                    logger.info(f"Query: {query}")
+                    logger.info(f"Query (after placeholder substitution): {query}")
                     
                     # Pass parameters directly to MCP server
                     mcp_args = {
@@ -67,6 +147,11 @@ def create_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[
                     
                     result = await kusto_service._session.call_tool(tool_name, mcp_args)
                     normalized = kusto_service._normalize_tool_result(result)
+                    
+                    # Store query results in conversation context
+                    if normalized and isinstance(normalized, dict) and normalized.get("success"):
+                        context_service.update_from_query_result(normalized)
+                    
                     return json.dumps(normalized)
                 else:
                     return json.dumps({"success": False, "error": f"Missing required parameters for {tool_name}: clusterUrl, database, query"})
@@ -76,6 +161,11 @@ def create_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[
                 result = await kusto_service._session.call_tool(tool_name, actual_args)
                 # Normalize the result
                 normalized = kusto_service._normalize_tool_result(result)
+                
+                # Store query results in conversation context if successful
+                if normalized and isinstance(normalized, dict) and normalized.get("success"):
+                    context_service.update_from_query_result(normalized)
+                
                 return json.dumps(normalized)
             else:
                 return json.dumps({"success": False, "error": "MCP session not available"})
@@ -97,21 +187,27 @@ class AgentService:
         self.intune_expert_agent: AssistantAgent | None = None
         self.magentic_one_team: MagenticOneGroupChat | None = None
         self.model_client: ChatCompletionClient | None = None
-        self.instructions_path = Path(__file__).parent.parent.parent / "instructions.md"
-        self.scenarios: list[dict[str, Any]] = []
-        self.instructions_content: str = ""
+        # Force reload scenarios to ensure we have the latest matching logic
+        from services.scenario_lookup_service import reload_scenarios
+        reload_scenarios()
+        self.scenario_service = get_scenario_service()
 
     def list_instruction_scenarios(self) -> list[dict[str, Any]]:
         """Return a lightweight summary of parsed instruction scenarios."""
-        return [
-            {
-                "index": idx,
-                "title": sc.get("title"),
-                "query_count": len(sc.get("queries", [])),
-                "description": (sc.get("description") or "").split("\n")[0][:160]
-            }
-            for idx, sc in enumerate(self.scenarios)
-        ]
+        scenario_titles = self.scenario_service.list_all_scenario_titles()
+        scenarios = []
+        
+        for idx, title in enumerate(scenario_titles):
+            scenario = self.scenario_service.get_scenario_by_title(title)
+            if scenario:
+                scenarios.append({
+                    "index": idx,
+                    "title": scenario.title,
+                    "query_count": len(scenario.queries),
+                    "description": scenario.description.split("\n")[0][:160] if scenario.description else ""
+                })
+        
+        return scenarios
 
     async def run_instruction_scenario(self, scenario_ref: int | str) -> dict[str, Any]:
         """Execute all queries in a referenced scenario via the Intune expert agent.
@@ -123,23 +219,26 @@ class AgentService:
             raise ValueError("Intune expert agent not initialized")
         
         try:
-            if not self.scenarios:
-                raise ValueError("No scenarios parsed from instructions.md")
+            scenario_titles = self.scenario_service.list_all_scenario_titles()
+            
+            if not scenario_titles:
+                raise ValueError("No scenarios available")
 
-            scenario: dict[str, Any] | None = None
+            scenario = None
             if isinstance(scenario_ref, int):
-                if 0 <= scenario_ref < len(self.scenarios):
-                    scenario = self.scenarios[scenario_ref]
+                if 0 <= scenario_ref < len(scenario_titles):
+                    title = scenario_titles[scenario_ref]
+                    scenario = self.scenario_service.get_scenario_by_title(title)
             else:
-                ref_lower = scenario_ref.lower()
-                for sc in self.scenarios:
-                    if sc.get("title", "").lower() == ref_lower:
-                        scenario = sc
-                        break
-                if scenario is None:
-                    for sc in self.scenarios:
-                        if ref_lower in sc.get("title", "").lower():
-                            scenario = sc
+                # Find by title
+                scenario = self.scenario_service.get_scenario_by_title(scenario_ref)
+                
+                # If not found, try partial match
+                if not scenario:
+                    ref_lower = scenario_ref.lower()
+                    for title in scenario_titles:
+                        if ref_lower in title.lower():
+                            scenario = self.scenario_service.get_scenario_by_title(title)
                             break
 
             if scenario is None:
@@ -150,7 +249,7 @@ class AgentService:
 
             tables: list[dict[str, Any]] = []
             errors: list[str] = []
-            for idx, query in enumerate(scenario.get("queries", [])):
+            for idx, query in enumerate(scenario.queries):
                 res = await kusto_service.execute_kusto_query(query)
                 if res.get("success"):
                     tables.append(res.get("table", {"columns": ["Result"], "rows": [["(empty)"]], "total_rows": 0}))
@@ -159,14 +258,14 @@ class AgentService:
                     errors.append(f"Query {idx+1}: {err}")
                     tables.append({"columns": ["Error"], "rows": [[err]], "total_rows": 1})
 
-            summary_parts = [f"Scenario: {scenario.get('title')} ({len(tables)} queries)"]
+            summary_parts = [f"Scenario: {scenario.title} ({len(tables)} queries)"]
             if errors:
                 summary_parts.append(f"{len(errors)} query errors encountered.")
             summary = " \n".join(summary_parts)
 
             return {
-                "scenario": scenario.get("title"),
-                "description": scenario.get("description"),
+                "scenario": scenario.title,
+                "description": scenario.description,
                 "tables": tables,
                 "summary": summary,
                 "errors": errors,
@@ -187,6 +286,10 @@ class AgentService:
         global agent_service
         agent_service = cls()
         await agent_service._load_instructions()
+        
+        # Proactively validate authentication for cognitive services to catch stale tokens early
+        await agent_service._validate_authentication()
+        
         # Eagerly spin up MCP server so auth is handled once at startup
         try:
             from services.kusto_mcp_service import get_kusto_service
@@ -195,8 +298,11 @@ class AgentService:
             # Extract cluster/database pairs for a single list_tables prewarm per cluster
             try:
                 all_queries: list[str] = []
-                for sc in agent_service.scenarios:
-                    all_queries.extend(sc.get("queries", []))
+                scenario_titles = agent_service.scenario_service.list_all_scenario_titles()
+                for title in scenario_titles:
+                    scenario = agent_service.scenario_service.get_scenario_by_title(title)
+                    if scenario:
+                        all_queries.extend(scenario.queries)
                 if all_queries:
                     import re
                     pair_pattern = r"cluster\([\"']([^\"']+)[\"']\)\.database\([\"']([^\"']+)[\"']\)"
@@ -240,21 +346,58 @@ class AgentService:
             # Swallow errors so reload can proceed
     
     async def _load_instructions(self) -> None:
-        """Load instructions.md content for agent context"""
+        """Initialize scenario service (scenarios are loaded automatically)"""
         try:
-            with open(self.instructions_path, encoding='utf-8') as f:
-                self.instructions_content = f.read()
-            # Parse scenarios for structured access
-            try:
-                parsed = parse_instructions(self.instructions_content)
-                self.scenarios = parsed
-                logger.info(f"Parsed {len(self.scenarios)} instruction scenarios with queries")
-            except Exception as perr:  # noqa: BLE001
-                logger.warning(f"Failed to parse instruction scenarios: {perr}")
-        except FileNotFoundError:
-            self.instructions_content = "Instructions file not found"
-            self.scenarios = []
+            # Scenario service is already initialized in __init__, just log status
+            scenario_titles = self.scenario_service.list_all_scenario_titles()
+            logger.info(f"Loaded {len(scenario_titles)} instruction scenarios")
+        except Exception as e:
+            logger.warning(f"Failed to load instruction scenarios: {e}")
     
+    def reload_scenarios(self) -> None:
+        """Reload scenarios from instructions.md"""
+        try:
+            from services.scenario_lookup_service import reload_scenarios
+            reload_scenarios()
+            self.scenario_service = get_scenario_service()
+            scenario_titles = self.scenario_service.list_all_scenario_titles()
+            logger.info(f"Reloaded {len(scenario_titles)} instruction scenarios")
+        except Exception as e:
+            logger.error(f"Failed to reload scenarios: {e}")
+    
+    async def _validate_authentication(self) -> None:
+        """Proactively validate authentication tokens to catch stale tokens early"""
+        try:
+            logger.info("Validating authentication tokens...")
+            
+            # Test cognitive services token retrieval (this is what Azure OpenAI uses)
+            cognitive_token = await auth_service.get_cognitive_services_token()
+            if not cognitive_token:
+                raise Exception("Failed to retrieve cognitive services token")
+            
+            # Test graph token retrieval (for user info)  
+            graph_token = await auth_service.get_graph_token()
+            if not graph_token:
+                raise Exception("Failed to retrieve Microsoft Graph token")
+                
+            logger.info("Authentication validation successful - all required tokens obtained")
+            
+        except Exception as e:
+            logger.error(f"Authentication validation failed: {e}")
+            logger.info("Clearing token cache and forcing fresh authentication...")
+            
+            # Clear stale tokens and try once more with force refresh
+            auth_service.clear_token_cache()
+            
+            try:
+                # Force fresh token retrieval
+                await auth_service.get_cognitive_services_token()
+                await auth_service.get_graph_token()
+                logger.info("Authentication validation successful after cache clear")
+            except Exception as retry_e:
+                logger.error(f"Authentication validation failed even after cache clear: {retry_e}")
+                raise Exception(f"Authentication system not ready: {retry_e}")
+
     def _create_azure_model_client(self, model_config: ModelConfiguration) -> AzureOpenAIChatCompletionClient:
         """Create Azure OpenAI client for the given model configuration"""
         # Use WAM broker credential for Azure OpenAI authentication
@@ -285,6 +428,29 @@ class AgentService:
                 
                 # Create FunctionTool wrappers for each MCP tool
                 tools: list[BaseTool[Any, Any] | Callable[..., Any] | Callable[..., Awaitable[Any]]] = []
+                
+                # Add the scenario lookup tool first
+                lookup_function = create_scenario_lookup_function()
+                lookup_tool = FunctionTool(
+                    lookup_function,
+                    name="lookup_scenarios",
+                    description="Look up relevant diagnostic scenarios from instructions.md based on user request keywords. "
+                                "Use this tool to find the appropriate Kusto queries for a user's diagnostic request."
+                )
+                tools.append(lookup_tool)
+                logger.info("Added scenario lookup tool")
+                
+                # Add the context lookup tool
+                context_function = create_context_lookup_function()
+                context_tool = FunctionTool(
+                    context_function,
+                    name="lookup_context",
+                    description="Look up stored conversation context values like DeviceId, AccountId, ContextId from previous queries. "
+                                "Use this when you need values from earlier in the conversation to fill placeholders in queries. "
+                                "Call with no parameters to see all available context, or with a specific key to get one value."
+                )
+                tools.append(context_tool)
+                logger.info("Added context lookup tool")
                 
                 for mcp_tool in mcp_tools:
                     tool_name = mcp_tool.name
@@ -328,20 +494,46 @@ class AgentService:
     - Do NOT list them under GIVEN FACTS or treat them as entities that require lookup or explanation.
     - If they appear in prior context, silently ignore them unless explicitly asked by the user to explain internal architecture (rare; otherwise omit).
         
-        CRITICAL INSTRUCTIONS FROM INSTRUCTIONS.MD:
-        {self.instructions_content}
+        AVAILABLE DIAGNOSTIC SCENARIOS:
+        {self.scenario_service.get_scenario_summary()}
         
         NATURAL LANGUAGE UNDERSTANDING:
         - Interpret user requests naturally without requiring specific keywords or parameters
         - Extract relevant identifiers (Device IDs, Account IDs, Context IDs) from user messages
-        - Map user intents to appropriate scenarios and queries from instructions.md
-        - Use the MCP server tools to execute the queries defined in instructions.md
+        - Use the lookup_scenarios tool to find relevant diagnostic scenarios based on user intent
+        - Execute only the queries provided by the lookup_scenarios tool - do not create your own queries
+        
+        MANDATORY WORKFLOW (MUST FOLLOW IN ORDER):
+        1. ALWAYS call lookup_scenarios first with the user's request text
+        2. If the scenario requires context from previous queries, call lookup_context to get stored values
+        3. Execute ONLY the queries returned by lookup_scenarios using MCP tools
+        4. Return results in table format as specified in instructions.md
+        
+        DO NOT:
+        - Create your own queries or speculation
+        - Skip the lookup_scenarios step
+        - Provide "fact sheets" or analysis without executing queries
+        - Make educated guesses about data not retrieved
+        
+        SCENARIO LOOKUP WORKFLOW:
+        1. When a user makes a request, IMMEDIATELY call lookup_scenarios with their request text
+        2. The tool will return relevant diagnostic scenarios with their queries  
+        3. Use the MCP server tools to execute the queries from the retrieved scenarios
+        4. Always use the exact cluster URLs and database names from the scenario queries
+        
+        CONVERSATION CONTEXT HANDLING:
+        - The system automatically stores key identifiers (DeviceId, AccountId, ContextId, etc.) from query results
+        - Placeholders like '<Fetch the accountId from Device Details and replace here>' are automatically substituted
+        - For follow-up questions, use lookup_context if you need to check what context is available
+        - Example: "tenant information for this device" → lookup_scenarios → execute tenant query with stored AccountId
+        - If needed context is missing, ask the user to provide the required identifiers
         
         KUSTO QUERY EXECUTION:
-        - Use ONLY the queries provided in instructions.md - do not create your own queries
-        - The MCP server provides various tools for executing Kusto queries
+        - Use ONLY the queries provided by lookup_scenarios - do not create your own queries
+        - Before executing queries with placeholders, the system will automatically substitute stored context values
+        - The MCP server provides various tools for executing Kusto queries  
         - Common tools include: execute_query, executeQuery, and other MCP-specific tools
-        - Always use the appropriate cluster URLs and database names from the queries in instructions.md
+        - Always use the appropriate cluster URLs and database names from the scenario queries
         
         RESPONSE FORMAT (MANDATORY):
         1. Always return a TABLE first (raw results as markdown)
@@ -351,10 +543,13 @@ class AgentService:
         5. If multiple datasets needed, show multiple labeled tables
 
     STRICT BEHAVIOR RULES (GLOBAL):
-    - DO NOT speculate about group memberships, policies, or statuses not explicitly present in returned query/table data.
-    - If user asks for data you have not fetched yet, either (a) run ONLY the minimal specific query from instructions.md, or (b) ask for required identifiers you lack.
-    - Never invent likely or probable groups; only list groups surfaced by queries. If resolution of IDs fails, report the failure and request guidance.
-    - If previous attempts produced HTTP errors, summarize the error and await user direction instead of guessing.
+    - ALWAYS use lookup_scenarios first - do not skip this step to create analysis or fact sheets
+    - DO NOT create "fact sheets", "educated guesses", or lengthy analysis - execute queries instead
+    - DO NOT speculate about group memberships, policies, or statuses not explicitly present in returned query/table data
+    - If user asks for data you have not fetched yet, use lookup_scenarios to find the appropriate query and execute it
+    - Never invent likely or probable groups; only list groups surfaced by queries
+    - If queries fail with errors, report the specific error and ask for guidance
+    - EXECUTE QUERIES, DON'T ANALYZE - your job is to run Kusto queries, not theorize
     - Keep answers tightly scoped to the user request; avoid expanding into unrelated diagnostics.
     - If context is ambiguous (missing device/account/context IDs), ask a concise clarifying question instead of assuming.
         
@@ -725,11 +920,13 @@ class AgentService:
                     role_tag = "USER" if turn["role"] == "user" else "ASSISTANT"
                     history_lines.append(f"{role_tag}: {turn['content']}")
                 guardrail = """
-STRICT RESPONSE CONSTRAINTS (if any data not already retrieved DO NOT invent it):
-- Do NOT speculate about memberships, policies, or group names if they have not been explicitly retrieved via a successful query/table.
-- If the user requests something requiring additional lookup, respond with a concise clarification request or perform ONLY the minimal exact query needed (from instructions.md) to obtain it.
-- Never list 'likely' or 'probable' groups; only report factual rows from returned tables.
-- If prior attempts produced errors (HTTP 400 etc.), summarize the failure and ask for next instruction instead of guessing.
+STRICT RESPONSE CONSTRAINTS:
+- ALWAYS use lookup_scenarios to find the appropriate query for the user's request
+- EXECUTE the exact query from instructions.md - do not skip query execution
+- Do NOT create analysis, fact sheets, or speculation - execute queries and return table results
+- Only report data that comes from successful query results
+- If a query fails, report the error and ask for guidance
+- Use lookup_context to get stored values for placeholders in queries
 """ if strict_mode else ""
                 composite_task = (
                     ("The following is the prior conversation (most recent last). Use it to maintain context such as referenced device IDs or other identifiers.\n" + "\n".join(history_lines) + "\n\n")
@@ -740,8 +937,10 @@ STRICT RESPONSE CONSTRAINTS (if any data not already retrieved DO NOT invent it)
                 if strict_mode:
                     composite_task = (
                         "STRICT RESPONSE MODE:\n" 
-                        "- Only answer using factual data already retrieved or newly queried via allowed instructions.\n"
-                        "- Do not speculate or infer. If data missing, ask a clarifying question or state required query.\n\n"
+                        "- ALWAYS start by calling lookup_scenarios with the user's request\n"
+                        "- EXECUTE the queries returned by lookup_scenarios - do not skip execution\n"
+                        "- Use lookup_context to get stored values if queries have placeholders\n"
+                        "- Only return factual data from query results, no speculation\n\n"
                         f"User message: {message}"
                     )
                 else:
@@ -788,14 +987,15 @@ STRICT RESPONSE CONSTRAINTS (if any data not already retrieved DO NOT invent it)
         # Extract any obvious identifiers from the message for context
         guid_match = re.search(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", message)
         
-        # Check for scenario references
-        if self.scenarios:
+        # Check for scenario references using the new service
+        scenario_titles = self.scenario_service.list_all_scenario_titles()
+        if scenario_titles:
             message_lower = message.lower()
-            for scenario in self.scenarios:
-                title = scenario.get("title", "").lower()
-                if title and (title in message_lower or any(word in title for word in message_lower.split() if len(word) > 3)):
-                    logger.info(f"Scenario match found: {scenario.get('title')}")
-                    return await self.query_diagnostics("scenario", {"scenario": scenario.get("title")})
+            for title in scenario_titles:
+                title_lower = title.lower()
+                if title_lower and (title_lower in message_lower or any(word in title_lower for word in message_lower.split() if len(word) > 3)):
+                    logger.info(f"Scenario match found: {title}")
+                    return await self.query_diagnostics("scenario", {"scenario": title})
         
         # Simple intent mapping as fallback
         intent_keywords = {

@@ -1,0 +1,14 @@
+{
+  "device_id": null,
+  "account_id": null,
+  "context_id": null,
+  "tenant_id": null,
+  "user_id": null,
+  "scale_unit_name": null,
+  "serial_number": null,
+  "device_name": null,
+  "azure_ad_device_id": null,
+  "primary_user": null,
+  "enrolled_by_user": null,
+  "last_updated": "2025-09-25T00:49:31.759166+00:00"
+}
