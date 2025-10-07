@@ -3,7 +3,7 @@ name = "intune-diagnostics-backend"
 version = "0.1.0"
 description = "Intune Diagnostics Web App Backend with Agentic AI"
 authors = [{ name = "Support Engineer", email = "support@example.com" }]
-readme = "README.md"
+readme = "docs/README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.104.0",
@@ -15,6 +15,7 @@ dependencies = [
     "azure-identity>=1.15.0",
     "autogen-agentchat>=0.4.0",
     "autogen-ext[azure,openai]>=0.4.0",
+    "agent-framework>=0.1.0",
     "python-multipart>=0.0.6",
     "python-jose[cryptography]>=3.3.0",
     "passlib[bcrypt]>=1.7.4",
@@ -23,6 +24,12 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "mcp>=1.13.1",
     "autogen-magentic-one>=0.0.1",
+    "langchain-community>=0.3.0",
+    "langchain-core>=0.3.0",
+    "langchain-huggingface>=0.1.0",
+    "sentence-transformers>=2.2.0",
+    "faiss-cpu>=1.7.0",
+    "hf-xet>=0.6.0",
 ]
 
 [project.optional-dependencies]
@@ -49,6 +56,8 @@ dev-dependencies = [
     "ruff>=0.1.0",
     "mypy>=1.6.0",
 ]
+# Allow prerelease versions for agent-framework and related packages
+prerelease = "allow"
 
 [tool.black]
 line-length = 100

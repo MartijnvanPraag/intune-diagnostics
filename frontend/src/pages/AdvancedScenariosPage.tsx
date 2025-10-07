@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '@/contexts/AuthContext'
 import { diagnosticsService, QueryType, DiagnosticRequest, AgentResponse, DiagnosticResponse } from '@/services/diagnosticsService'
 import DataTable from '@/components/DataTable'
+import MarkdownRenderer from '@/components/MarkdownRenderer'
 import { useForm } from 'react-hook-form'
 import { MagnifyingGlassIcon, ClockIcon, ExclamationTriangleIcon, TrashIcon, XMarkIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
@@ -372,11 +373,7 @@ const AdvancedScenariosPage: React.FC = () => {
                     AI Insight Summary
                   </h3>
                   <div className="win11-card p-4">
-                    <div className="prose prose-sm max-w-none">
-                      <p className="text-win11-text-primary whitespace-pre-wrap">
-                        {result.response}
-                      </p>
-                    </div>
+                    <MarkdownRenderer content={result.response} />
                   </div>
                 </div>
 

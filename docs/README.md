@@ -27,7 +27,7 @@ A modern web application that uses Agentic AI to interface with Kusto MCP server
 │   │   └── settings.py      # Model configuration endpoints
 │   └── services/     # Business logic
 │       ├── auth_service.py      # WAM-preferred Azure authentication
-│       ├── agent_service.py     # Autogen agent orchestration
+│       ├── autogen_service.py   # Autogen agent orchestration
 │       └── kusto_mcp_service.py # MCP Kusto integration
 ├── frontend/         # React frontend with TypeScript
 │   ├── src/
@@ -255,6 +255,30 @@ npm run frontend:install
 
 ## Troubleshooting
 
+**For detailed troubleshooting, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md)**
+
+**For UV package manager usage, see [UV_USAGE.md](UV_USAGE.md)**
+
+### Quick Fixes
+
+#### MCP JSONRPC Errors (Suppressed)
+The Kusto MCP server has a known bug where it logs to stdout instead of stderr, causing harmless validation errors. These are now automatically suppressed via logging filter.
+
+✅ **Status**: Errors suppressed, MCP service works correctly
+
+#### Agent Framework Import Errors
+**Always use `uv run` to run Python commands:**
+```powershell
+# ✅ Correct
+uv run uvicorn backend.main:app --reload
+
+# ❌ Wrong - uses system Python instead of virtual environment
+python backend/main.py
+```
+
+#### Frontend Connection Errors
+Start backend first, wait for "Application startup complete", then start frontend.
+
 ### Authentication Issues
 
 1. **Cached Credentials**: Click "Sign Out" → "Force New Login"
@@ -280,8 +304,15 @@ npm run frontend:install
 - **Backend Logs**: uvicorn console output with detailed error messages
 - **Frontend Logs**: Browser developer console
 - **Authentication**: Detailed logging in auth_service.py
-- **MCP Communication**: JSON-RPC logs for Kusto server interaction
+- **MCP Communication**: JSON-RPC logs for Kusto server interaction (validation errors suppressed)
 - **Chat Sessions**: Conversation state and message history in database
+
+## Documentation
+
+- **[UV_USAGE.md](UV_USAGE.md)** - Complete guide to using UV package manager
+- **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - Comprehensive troubleshooting guide
+- **[AGENT_FRAMEWORK_MIGRATION.md](AGENT_FRAMEWORK_MIGRATION.md)** - Agent Framework migration documentation
+- **[AGENT_FRAMEWORK_QUICK_REFERENCE.md](AGENT_FRAMEWORK_QUICK_REFERENCE.md)** - Quick reference for Agent Framework
 
 ## License
 

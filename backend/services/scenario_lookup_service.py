@@ -100,7 +100,12 @@ class ScenarioLookupService:
             'application', 'applications', 'app', 'apps', 'group', 'groups',
             'tenant', 'user', 'users', 'enrollment', 'autopilot', 'mam',
             'effective', 'assignment', 'assignments', 'status', 'details',
-            'troubleshooting', 'investigation', 'timeline', 'kusto', 'query'
+            'troubleshooting', 'investigation', 'timeline', 'kusto', 'query',
+            # Add specific technical keywords
+            'dcv1', 'dcv2', 'conflict', 'conflicts', 'conflicting',
+            'esp', 'jamf', 'third', 'party', 'integration',
+            'setting', 'settings', 'payload', 'payloads',
+            'identify', 'intune', 'ztd', 'autopilot'
         }
         
         # Extract keywords present in the text
@@ -109,11 +114,21 @@ class ScenarioLookupService:
             if keyword in text:
                 found_keywords.add(keyword)
         
-        # Add title words as keywords (cleaned)
+        # Add ALL title words as keywords (not just >2 chars to capture dcv1, dcv2, id, etc.)
         title_words = set(word.strip('.,!?()[]{}').lower() 
                          for word in title.split() 
-                         if len(word) > 2 and word.isalpha())
+                         if len(word) > 1 and (word.isalpha() or word.isalnum()))
         found_keywords.update(title_words)
+        
+        # Extract compound technical terms (e.g., "dcv1_v_dcv2", "policy_conflicts")
+        # Split on common separators and add both compound and parts
+        for separator in ['/', '_', '-', ' and ', ' vs ']:
+            if separator in text:
+                parts = text.split(separator)
+                for part in parts:
+                    cleaned = part.strip('.,!?()[]{}').lower()
+                    if len(cleaned) > 1:
+                        found_keywords.add(cleaned)
         
         return found_keywords
     
@@ -153,9 +168,14 @@ class ScenarioLookupService:
     def find_scenarios_by_keywords(self, user_input: str, max_results: int = 3) -> List[str]:
         """Find scenario titles that match keywords in user input"""
         user_input_lower = user_input.lower()
-        user_words = set(word.lower().strip('.,!?()[]{}') 
-                        for word in user_input.split() 
-                        if len(word) > 2)
+        
+        # Extract words from user input (handle underscores, hyphens, and slashes)
+        user_words = set()
+        for separator in [' ', '_', '-', '/']:
+            for word in user_input_lower.split(separator):
+                cleaned = word.strip('.,!?()[]{}').lower()
+                if len(cleaned) > 1:
+                    user_words.add(cleaned)
         
         # Score scenarios by keyword matches
         scenario_scores = {}
@@ -171,7 +191,13 @@ class ScenarioLookupService:
                 score += 20
             
             # High priority: Multiple title words match
-            title_words = set(word.lower() for word in actual_title.split() if len(word) > 2)
+            title_words = set()
+            for separator in [' ', '_', '-', '/']:
+                for word in actual_title.split(separator):
+                    cleaned = word.lower().strip('.,!?()[]{}')
+                    if len(cleaned) > 1:
+                        title_words.add(cleaned)
+            
             matching_title_words = title_words.intersection(user_words)
             if matching_title_words:
                 score += len(matching_title_words) * 10
@@ -181,19 +207,31 @@ class ScenarioLookupService:
                 if word in scenario_info.keywords:
                     score += 5
             
-            # Lower priority: Partial keyword matches
+            # Lower priority: Partial keyword matches (substring matching)
             for word in user_words:
                 for keyword in scenario_info.keywords:
-                    if word in keyword or keyword in word:
+                    if len(word) > 2 and (word in keyword or keyword in word):
                         score += 2
+            
+            # Bonus: Technical term matches (dcv1, dcv2, esp, etc.)
+            technical_terms = {'dcv1', 'dcv2', 'esp', 'ztd', 'jamf', 'mam', 'conflict', 'conflicts'}
+            for term in technical_terms:
+                if term in user_words and term in scenario_info.keywords:
+                    score += 15  # High priority for technical terms
             
             # Store score if any matches found
             if score > 0:
                 scenario_scores[normalized_title] = score
+                logger.debug(f"Scenario '{actual_title}' scored {score} for query '{user_input}'")
         
         # Sort by score and return top matches
         sorted_scenarios = sorted(scenario_scores.items(), key=lambda x: x[1], reverse=True)
-        return [title for title, score in sorted_scenarios[:max_results]]
+        top_titles = [title for title, score in sorted_scenarios[:max_results]]
+        
+        if top_titles:
+            logger.info(f"Top matches for '{user_input}': {[self.scenario_lookup[t].title for t in top_titles]}")
+        
+        return top_titles
     
     def get_scenario_by_title(self, title: str) -> Optional[DetailedScenario]:
         """Get full scenario details by title"""

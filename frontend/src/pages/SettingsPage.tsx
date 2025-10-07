@@ -170,6 +170,12 @@ const SettingsPage: React.FC = () => {
                         <span className="text-win11-text-secondary">API Version:</span>
                         <div className="text-win11-text-primary">{config.api_version}</div>
                       </div>
+                      <div>
+                        <span className="text-win11-text-secondary">Agent Framework:</span>
+                        <div className="text-win11-text-primary">
+                          {config.agent_framework === 'agent_framework' ? 'Microsoft Agent Framework' : 'Autogen Framework'}
+                        </div>
+                      </div>
                     </div>
                   </div>
                   <div className="flex items-center space-x-2 ml-4">

@@ -11,6 +11,7 @@ export interface ModelConfiguration {
   model_name: string
   api_version: string
   is_default: boolean
+  agent_framework: string  // "autogen" or "agent_framework"
   created_at?: string
   updated_at?: string
 }
@@ -23,6 +24,7 @@ export interface ModelConfigurationCreate {
   model_name: string
   api_version?: string
   is_default?: boolean
+  agent_framework?: string  // "autogen" or "agent_framework"
 }
 
 class SettingsService {

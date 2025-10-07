@@ -33,7 +33,8 @@ const ModelConfigForm: React.FC<ModelConfigFormProps> = ({
       azure_deployment: initialData?.azure_deployment || '',
       model_name: initialData?.model_name || '',
       api_version: initialData?.api_version || '2024-06-01',
-      is_default: initialData?.is_default || false
+      is_default: initialData?.is_default || false,
+      agent_framework: initialData?.agent_framework || 'autogen'
     }
   })
 
@@ -135,6 +136,22 @@ const ModelConfigForm: React.FC<ModelConfigFormProps> = ({
                 className="win11-input w-full"
                 placeholder="2024-06-01"
               />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-win11-text-primary mb-2">
+                Agent Framework
+              </label>
+              <select
+                {...register('agent_framework')}
+                className="win11-input w-full"
+              >
+                <option value="autogen">Autogen Framework (MagenticOne)</option>
+                <option value="agent_framework">Microsoft Agent Framework</option>
+              </select>
+              <div className="text-xs text-win11-text-tertiary mt-1">
+                Choose the multi-agent framework to use for diagnostics orchestration
+              </div>
             </div>
 
             <div className="flex items-center space-x-3">

@@ -141,7 +141,18 @@ class ConversationStateService:
     
     def __init__(self):
         self.context = ConversationContext()
-        self._session_file = Path("backend/conversation_state.json")
+        # Resolve backend root directory robustly (this file: backend/services/conversation_state.py)
+        backend_root = Path(__file__).resolve().parents[1]
+        self._session_file = backend_root / "conversation_state.json"
+        # Migration: if an older incorrectly nested path exists (backend/backend/conversation_state.json), move it
+        try:
+            old_nested = backend_root / "backend" / "conversation_state.json"
+            if old_nested.exists() and not self._session_file.exists():
+                self._session_file.parent.mkdir(parents=True, exist_ok=True)
+                old_nested.replace(self._session_file)
+                logger.info(f"Migrated conversation state from old path {old_nested} to {self._session_file}")
+        except Exception as e:
+            logger.warning(f"Failed migrating old conversation state file: {e}")
     
     def clear_context(self) -> None:
         """Clear all stored context"""

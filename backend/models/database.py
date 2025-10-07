@@ -27,6 +27,7 @@ class ModelConfiguration(Base):
     model_name = Column(String(255), nullable=False)
     api_version = Column(String(50), default="2024-06-01")
     is_default = Column(Boolean, default=False)
+    agent_framework = Column(String(50), default="autogen")  # "autogen" or "agent_framework"
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 

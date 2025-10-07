@@ -1,12 +1,36 @@
 import asyncio
 import os
 import sys
+import logging
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 # Set the correct event loop policy for Windows to support subprocesses
 if sys.platform.startswith('win'):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+# Configure logging FIRST before any other imports
+# This ensures logging is properly set up for all modules
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(levelname)s] %(name)s: %(message)s',
+    force=True  # Force reconfiguration if already configured
+)
+
+# Configure logging to suppress MCP JSONRPC validation errors
+# These occur because the Kusto MCP server incorrectly writes logs to stdout
+# The MCP client still works correctly, so we suppress these non-critical errors
+class MCPJsonRpcFilter(logging.Filter):
+    """Filter to suppress MCP JSONRPC validation errors from external Kusto server"""
+    def filter(self, record):
+        # Suppress "Failed to parse JSONRPC message" errors - these are from the buggy Kusto MCP server
+        if record.name == "mcp.client.stdio" and "Failed to parse JSONRPC message" in record.getMessage():
+            return False
+        return True
+
+# Apply the filter to the MCP logger
+mcp_logger = logging.getLogger("mcp.client.stdio")
+mcp_logger.addFilter(MCPJsonRpcFilter())
 
 load_dotenv()
 from fastapi import FastAPI, HTTPException, Depends
@@ -17,7 +41,7 @@ from azure.identity import DefaultAzureCredential
 
 from models.database import Base
 from routers import auth, settings, diagnostics
-from services.agent_service import AgentService
+from services.autogen_service import AgentService
 from dependencies import engine, get_db
 
 

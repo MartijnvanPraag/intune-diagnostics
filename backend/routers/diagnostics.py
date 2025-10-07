@@ -1,16 +1,53 @@
 import uuid
-from typing import List, Optional, cast
+from typing import List, Optional, cast, Union
 from fastapi import APIRouter, HTTPException, Depends, Query, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from models.database import DiagnosticSession, ModelConfiguration, ChatSession, ChatMessage
 from models.schemas import DiagnosticRequest, DiagnosticResponse, AgentResponse
 from pydantic import BaseModel
-from services.agent_service import agent_service as global_agent_service, AgentService
+from services.autogen_service import agent_service as global_agent_service, AgentService
+from services.agent_framework_service import agent_framework_service as global_agent_framework_service, AgentFrameworkService
 
 router = APIRouter()
 
 from dependencies import get_db
+
+
+async def get_active_agent_service(
+    model_config: ModelConfiguration
+) -> Union[AgentService, AgentFrameworkService]:
+    """Get the appropriate agent service based on model configuration"""
+    framework = getattr(model_config, 'agent_framework', 'autogen')
+    
+    if framework == 'agent_framework':
+        # Use Agent Framework service
+        svc = global_agent_framework_service
+        if svc is None:
+            await AgentFrameworkService.initialize()
+            from services.agent_framework_service import agent_framework_service as refreshed
+            svc = refreshed
+        if svc is None:
+            raise HTTPException(status_code=500, detail="Agent Framework service not initialized")
+        
+        if not svc.intune_expert_agent:
+            await svc.setup_agent(model_config)
+        
+        return svc
+    else:
+        # Use Autogen service (default)
+        svc = global_agent_service
+        if svc is None:
+            await AgentService.initialize()
+            from services.autogen_service import agent_service as refreshed_agent_service
+            svc = refreshed_agent_service
+        if svc is None:
+            raise HTTPException(status_code=500, detail="Agent service not initialized")
+        
+        if not svc.intune_expert_agent:
+            await svc.setup_agent(model_config)
+        
+        return svc
 
 
 class BulkDeleteRequest(BaseModel):
@@ -108,16 +145,7 @@ async def chat_with_agent(
     db: AsyncSession = Depends(get_db)
 ):
     """Conversational endpoint with persistence: manages chat sessions and messages."""
-    # Ensure agent service ready
-    svc = global_agent_service
-    if svc is None:
-        await AgentService.initialize()
-        from services.agent_service import agent_service as refreshed_agent_service
-        svc = refreshed_agent_service
-    if svc is None:
-        raise HTTPException(status_code=500, detail="Agent service not initialized")
-
-    # Ensure agent model loaded (reuse default config logic from query endpoint)
+    # Get default model configuration
     result = await db.execute(
         select(ModelConfiguration)
         .where(ModelConfiguration.user_id == user_id)
@@ -126,8 +154,9 @@ async def chat_with_agent(
     model_config = result.scalar_one_or_none()
     if not model_config:
         raise HTTPException(status_code=400, detail="No default model configuration found.")
-    if not svc.intune_expert_agent:
-        await svc.setup_agent(model_config)
+    
+    # Get the appropriate agent service based on configuration
+    svc = await get_active_agent_service(model_config)
 
     # Retrieve or create chat session
     session_obj: Optional[ChatSession] = None
@@ -145,10 +174,12 @@ async def chat_with_agent(
     session_id = session_obj.session_id  # type: ignore[attr-defined]
 
     # Hydrate conversation state from stored snapshot (ensures continuity after restart)
-    try:
-        svc.state.load_from_snapshot(session_obj.state_snapshot or {})  # type: ignore[arg-type]
-    except Exception:
-        pass
+    # Note: Agent Framework service doesn't have a state attribute, state is handled in conversation_state service
+    if hasattr(svc, 'state'):
+        try:
+            svc.state.load_from_snapshot(session_obj.state_snapshot or {})  # type: ignore[attr-defined,arg-type]
+        except Exception:
+            pass
 
     # Persist user message early
     user_msg = ChatMessage(
@@ -250,19 +281,8 @@ async def execute_diagnostic_query(
         db.add(diagnostic_session)
         await db.commit()
         
-        # Ensure agent service initialized (global may be None at import time)
-        svc = global_agent_service
-        if svc is None:
-            # Initialize (will set global variable inside AgentService.initialize)
-            await AgentService.initialize()
-            from services.agent_service import agent_service as refreshed_agent_service  # late import
-            svc = refreshed_agent_service
-        if svc is None:
-            raise HTTPException(status_code=500, detail="Agent service failed to initialize")
-
-        # Setup agent if not already done
-        if not svc.intune_expert_agent:
-            await svc.setup_agent(model_config)
+        # Get the appropriate agent service based on configuration
+        svc = await get_active_agent_service(model_config)
         
         # Execute query through agent
         try:
@@ -287,7 +307,7 @@ async def execute_diagnostic_query(
                         tables_list.append(t)
                 if tables_list:
                     table_data = tables_list[0]
-            # Note: for the 'device_timeline' advanced scenario, the agent_service injects a synthetic table
+            # Note: for the 'device_timeline' advanced scenario, the autogen_service injects a synthetic table
             # with a single column 'mermaid_timeline' containing the mermaid timeline diagram contents. The
             # frontend can detect this column and render the diagram later (rendering not implemented yet).
 

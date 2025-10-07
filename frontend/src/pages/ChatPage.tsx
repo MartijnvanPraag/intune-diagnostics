@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { diagnosticsService, ChatResponse, ChatSessionSummary } from '@/services/diagnosticsService'
 import { useAuth } from '@/contexts/AuthContext'
 import DataTable from '@/components/DataTable'
+import MarkdownRenderer from '@/components/MarkdownRenderer'
 
 interface ChatMessage {
   role: 'user' | 'agent'
@@ -202,7 +203,11 @@ const ChatPage: React.FC = () => {
       <div className="flex-1 overflow-y-auto space-y-4 pr-2">
         {messages.map((m, idx) => (
           <div key={idx} className={`p-4 rounded-win11-small shadow-win11-small border text-sm ${m.role === 'user' ? 'bg-win11-primary text-white border-transparent ml-auto max-w-[80%]' : 'bg-win11-card border-win11-border mr-auto max-w-[85%]'}`}> 
-            <div className="whitespace-pre-wrap">{m.content}</div>
+            {m.role === 'user' ? (
+              <div className="whitespace-pre-wrap">{m.content}</div>
+            ) : (
+              <MarkdownRenderer content={m.content} />
+            )}
             {m.tables && m.tables.length > 0 && (
               <div className="mt-3 space-y-4">
                 {/* Export controls for this agent message */}

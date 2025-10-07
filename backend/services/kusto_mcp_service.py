@@ -12,8 +12,7 @@ from mcp.client.stdio import stdio_client, StdioServerParameters
 from mcp import types
 from contextlib import AsyncExitStack
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Logging is configured in main.py
 logger = logging.getLogger(__name__)
 
 MCP_PACKAGE = "@mcp-apps/kusto-mcp-server"
@@ -128,23 +127,33 @@ class KustoMCPService:
         last_error: Optional[str] = None
         for tool_name in execute_tool_candidates:
             try:
-                logger.info(f"Calling MCP tool '{tool_name}'")
+                logger.info(f"Calling MCP tool '{tool_name}' with query length: {len(query)} chars")
                 # Acquire (cached) AAD token for the cluster
-                try:
-                    from services.auth_service import auth_service
-                    access_token = await auth_service.get_kusto_token(cluster_url)
-                except Exception as token_err:  # noqa: BLE001
-                    logger.warning(f"Failed to acquire Kusto token (continuing unauthenticated) : {token_err}")
-                    access_token = None  # type: ignore
-                result = await self._session.call_tool(
-                    tool_name,
-                    {"clusterUrl": cluster_url, "database": database, "query": query, **({} if parameters is None else parameters), **({"accessToken": access_token} if access_token else {})}
-                )
+                access_token = None  # Temporarily disable accessToken passing to test if it causes 400 errors
+                # try:
+                #     from services.auth_service import auth_service
+                #     access_token = await auth_service.get_kusto_token(cluster_url)
+                # except Exception as token_err:  # noqa: BLE001
+                #     logger.warning(f"Failed to acquire Kusto token (continuing unauthenticated) : {token_err}")
+                #     access_token = None  # type: ignore
+                
+                mcp_params = {
+                    "clusterUrl": cluster_url, 
+                    "database": database, 
+                    "query": query, 
+                    **({} if parameters is None else parameters), 
+                    # **({"accessToken": access_token} if access_token else {})  # DISABLED - may cause 400 errors
+                }
+                
+                logger.debug(f"MCP call params (keys): {list(mcp_params.keys())}")
+                result = await self._session.call_tool(tool_name, mcp_params)
                 return self._normalize_tool_result(result)
             except Exception as e:  # noqa: BLE001
                 last_error = str(e)
-                logger.warning(f"Tool '{tool_name}' failed: {e}")
-        return {"success": False, "error": last_error or "Unknown MCP tool invocation failure"}
+                logger.error(f"Tool '{tool_name}' failed with error: {type(e).__name__}: {e}")
+                logger.error(f"Error details - cluster: {cluster_url}, db: {database}, query length: {len(query)}")
+        
+        return {"success": False, "error": f"Error executing Kusto query: {last_error or 'Unknown MCP tool invocation failure'}"}
 
 
     def _normalize_tool_result(self, result) -> Dict[str, Any]:
@@ -163,6 +172,11 @@ class KustoMCPService:
                 combined = "\n".join(texts)
                 if not combined:
                     return {"success": True, "table": {"columns": ["Content"], "rows": [[str(result.content[0])]], "total_rows": 1}}
+
+                # Check for error messages first
+                if combined.startswith("Error") or "failed" in combined.lower() or "status code" in combined.lower():
+                    logger.error(f"MCP server returned error: {combined}")
+                    return {"success": False, "error": combined}
 
                 # Extract JSON after prefix if present
                 if combined.startswith("Query results:"):

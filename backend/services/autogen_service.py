@@ -5,8 +5,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Logging is configured in main.py
 logger = logging.getLogger(__name__)
 
 from autogen_agentchat.agents import AssistantAgent

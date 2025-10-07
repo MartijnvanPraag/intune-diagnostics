@@ -26,6 +26,7 @@ class ModelConfigurationBase(BaseModel):
     model_name: str
     api_version: str = "2024-06-01"
     is_default: bool = False
+    agent_framework: str = "autogen"  # "autogen" or "agent_framework"
 
 class ModelConfigurationCreate(ModelConfigurationBase):
     user_id: int

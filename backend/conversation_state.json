@@ -1,14 +1,14 @@
 {
-  "device_id": "12345-device-id",
-  "account_id": "67890-account-id",
+  "device_id": null,
+  "account_id": null,
   "context_id": null,
   "tenant_id": null,
   "user_id": null,
   "scale_unit_name": null,
   "serial_number": null,
-  "device_name": "TestDevice001",
+  "device_name": null,
   "azure_ad_device_id": null,
   "primary_user": null,
   "enrolled_by_user": null,
-  "last_updated": "2025-09-24T23:52:56.442292+00:00"
+  "last_updated": null
 }
