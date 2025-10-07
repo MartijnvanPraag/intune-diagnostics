@@ -21,6 +21,11 @@ from typing import Any, AsyncGenerator
 # Logging is configured in main.py
 logger = logging.getLogger(__name__)
 
+# Buffer to hold recent MCP tool normalized results (tables) because Agent Framework
+# streaming events are not currently exposing function result payloads needed for
+# table reconstruction. This allows a fallback after workflow completion.
+TOOL_RESULTS_BUFFER: list[dict[str, Any]] = []
+
 # Agent Framework imports (equivalent to Autogen)
 # The agent-framework package provides the core chat agent functionality
 # Documentation: https://github.com/microsoft/agent-framework/tree/main/python
@@ -242,6 +247,11 @@ def create_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[
                     # Store query results in conversation context
                     if normalized and isinstance(normalized, dict) and normalized.get("success"):
                         context_service.update_from_query_result(normalized)
+                        try:
+                            if isinstance(normalized.get("table"), dict):
+                                TOOL_RESULTS_BUFFER.append(normalized)
+                        except Exception:  # noqa: BLE001
+                            pass
                     
                     return json.dumps(normalized)
                 else:
@@ -256,6 +266,11 @@ def create_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[
                 # Store query results in conversation context if successful
                 if normalized and isinstance(normalized, dict) and normalized.get("success"):
                     context_service.update_from_query_result(normalized)
+                    try:
+                        if isinstance(normalized.get("table"), dict):
+                            TOOL_RESULTS_BUFFER.append(normalized)
+                    except Exception:  # noqa: BLE001
+                        pass
                 
                 return json.dumps(normalized)
             else:
@@ -375,7 +390,7 @@ class AgentFrameworkService:
                 "summary": summary,
                 "errors": errors,
             }
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.error(f"Scenario execution failed: {e}")
             return {
                 "scenario": str(scenario_ref),
@@ -922,6 +937,8 @@ class AgentFrameworkService:
         
         try:
             logger.info(f"Executing diagnostic query: {query_type}")
+            # Clear any previous buffered tool results to avoid cross-query leakage
+            TOOL_RESULTS_BUFFER.clear()
             
             # Handle scenario execution directly
             if query_type == "scenario":
@@ -981,37 +998,81 @@ class AgentFrameworkService:
                 # Capture the final output
                 if isinstance(event, WorkflowOutputEvent):
                     logger.info("[Magentic] Received WorkflowOutputEvent - task completed")
-                    # Extract content from ChatMessage object
-                    if event.data and hasattr(event.data, 'content'):
-                        response_content = str(event.data.content)
-                    else:
-                        response_content = str(event.data) if event.data else ""
+                    # Robust extraction of textual content from Agent Framework objects
+                    data = getattr(event, 'data', None)
+                    extracted_text = ""
+                    try:
+                        if data is None:
+                            extracted_text = ""
+                        # ChatResponse has .text
+                        elif hasattr(data, 'text') and getattr(data, 'text'):
+                            extracted_text = getattr(data, 'text')  # type: ignore[assignment]
+                        # Some objects might expose 'content'
+                        elif hasattr(data, 'content') and getattr(data, 'content'):
+                            extracted_text = str(getattr(data, 'content'))
+                        # ChatMessage has .contents (list) – join any text parts
+                        elif hasattr(data, 'contents') and getattr(data, 'contents'):
+                            contents = getattr(data, 'contents')
+                            try:
+                                extracted_text = " ".join(
+                                    c.text for c in contents if hasattr(c, 'text') and getattr(c, 'text')
+                                )
+                            except Exception:  # noqa: BLE001
+                                extracted_text = ""
+                            if not extracted_text:
+                                # Fallback to repr if still empty
+                                extracted_text = str(data)
+                        else:
+                            extracted_text = str(data)
+                    except Exception as extract_err:  # noqa: BLE001
+                        logger.warning(f"[Magentic] Failed to extract text from workflow output: {extract_err}")
+                        extracted_text = str(data) if data else ""
+                    response_content = extracted_text
                 
                 # Extract tables from function result events
                 # The workflow may emit events with function call results
                 if hasattr(event, 'message'):
                     event_message = getattr(event, 'message', None)
                     if event_message and hasattr(event_message, 'contents'):
+                        logger.debug(f"[Magentic] Event message has {len(event_message.contents)} content items (query_diagnostics phase)")
                         try:
                             from agent_framework._types import FunctionResultContent
                         except ImportError:
                             from agent_framework import FunctionResultContent
                         
                         for content in event_message.contents:
-                            if isinstance(content, FunctionResultContent):
-                                if hasattr(content, 'result') and content.result:
-                                    result_data = content.result
-                                    if isinstance(result_data, dict):
-                                        extracted_objs.append(result_data)
-                                    elif isinstance(result_data, str):
-                                        try:
-                                            parsed = json.loads(result_data)
-                                            if isinstance(parsed, dict):
-                                                extracted_objs.append(parsed)
-                                        except json.JSONDecodeError:
-                                            pass
+                            try:
+                                # Function/tool result content
+                                if isinstance(content, FunctionResultContent) or hasattr(content, 'result'):
+                                    if hasattr(content, 'result') and getattr(content, 'result'):
+                                        result_data = getattr(content, 'result')
+                                        logger.debug(f"[Magentic] FunctionResultContent detected (type={type(result_data)})")
+                                        if isinstance(result_data, dict):
+                                            extracted_objs.append(result_data)
+                                        elif isinstance(result_data, str):
+                                            try:
+                                                parsed = json.loads(result_data)
+                                                if isinstance(parsed, dict):
+                                                    extracted_objs.append(parsed)
+                                            except json.JSONDecodeError:
+                                                multi = self._extract_json_objects(result_data)
+                                                if multi:
+                                                    extracted_objs.extend(obj for obj in multi if isinstance(obj, dict))
+                                # Text content JSON scan
+                                if hasattr(content, 'text') and getattr(content, 'text'):
+                                    text_val = getattr(content, 'text')
+                                    logger.debug(f"[Magentic] Text content candidate length={len(text_val)} (query_diagnostics)")
+                                    if ('{' in text_val and '}' in text_val) or ('[' in text_val and ']' in text_val):
+                                        objs = self._extract_json_objects(text_val)
+                                        if objs:
+                                            logger.debug(f"[Magentic] Extracted {len(objs)} JSON object(s) from text content")
+                                            extracted_objs.extend(obj for obj in objs if isinstance(obj, dict))
+                            except Exception as content_err:  # noqa: BLE001
+                                logger.debug(f"[Magentic] Content parsing error (query_diagnostics): {content_err}")
             
             logger.info(f"[Magentic] query_diagnostics: Extracted {len(extracted_objs)} objects from function results")
+            if extracted_objs:
+                logger.debug("[Magentic] Raw extracted objects sample (first 1): %s", json.dumps(extracted_objs[0])[:500])
             
             # If no objects from function results, try extracting from text response (fallback)
             if not extracted_objs:
@@ -1047,6 +1108,22 @@ class AgentFrameworkService:
             # Normalize and dedupe tables
             tables_all = self._normalize_table_objects(extracted_objs)
             unique_tables = self._dedupe_tables(tables_all)
+
+            # Fallback: if streaming yielded no tables but MCP normalized results were buffered
+            if (not unique_tables) and TOOL_RESULTS_BUFFER:
+                buffered_tables: list[dict[str, Any]] = []
+                for entry in TOOL_RESULTS_BUFFER:
+                    table_obj = entry.get("table") if isinstance(entry, dict) else None
+                    if isinstance(table_obj, dict) and table_obj.get("columns") and table_obj.get("rows"):
+                        buffered_tables.append({
+                            "columns": table_obj.get("columns", []),
+                            "rows": table_obj.get("rows", []),
+                            "total_rows": table_obj.get("total_rows", len(table_obj.get("rows", [])))
+                        })
+                if buffered_tables:
+                    unique_tables = self._dedupe_tables(buffered_tables)
+                    logger.info(f"[Magentic] Fallback buffer recovered {len(unique_tables)} table(s) for query_diagnostics")
+                TOOL_RESULTS_BUFFER.clear()
             
             if unique_tables:
                 logger.debug(f"[query_diagnostics] Total tables after normalization: {len(unique_tables)}")
@@ -1154,6 +1231,7 @@ STRICT RESPONSE CONSTRAINTS:
             # Run the Magentic workflow with streaming
             logger.info(f"[Magentic] Running workflow with message: {composite_task[:100]}...")
             response_content = ""
+            TOOL_RESULTS_BUFFER.clear()
             extracted_objs = []
             
             async for event in self.magentic_workflow.run_stream(composite_task):
@@ -1165,34 +1243,70 @@ STRICT RESPONSE CONSTRAINTS:
                 # Capture the final output
                 if isinstance(event, WorkflowOutputEvent):
                     logger.info("[Magentic] Received WorkflowOutputEvent - task completed")
-                    # Extract content from ChatMessage object
-                    if event.data and hasattr(event.data, 'content'):
-                        response_content = str(event.data.content)
-                    else:
-                        response_content = str(event.data) if event.data else ""
+                    # Robust extraction of textual content from Agent Framework objects
+                    data = getattr(event, 'data', None)
+                    extracted_text = ""
+                    try:
+                        if data is None:
+                            extracted_text = ""
+                        elif hasattr(data, 'text') and getattr(data, 'text'):
+                            extracted_text = getattr(data, 'text')  # ChatResponse or ChatMessage.text
+                        elif hasattr(data, 'content') and getattr(data, 'content'):
+                            extracted_text = str(getattr(data, 'content'))
+                        elif hasattr(data, 'contents') and getattr(data, 'contents'):
+                            contents = getattr(data, 'contents')
+                            try:
+                                extracted_text = " ".join(
+                                    c.text for c in contents if hasattr(c, 'text') and getattr(c, 'text')
+                                )
+                            except Exception:  # noqa: BLE001
+                                extracted_text = ""
+                            if not extracted_text:
+                                extracted_text = str(data)
+                        else:
+                            extracted_text = str(data)
+                    except Exception as extract_err:  # noqa: BLE001
+                        logger.warning(f"[Magentic] Failed to extract text from workflow output: {extract_err}")
+                        extracted_text = str(data) if data else ""
+                    response_content = extracted_text
                 
                 # Extract tables from function result events
                 if hasattr(event, 'message'):
                     event_message = getattr(event, 'message', None)
                     if event_message and hasattr(event_message, 'contents'):
+                        logger.debug(f"[Magentic] Event message has {len(event_message.contents)} content items (chat phase)")
                         try:
                             from agent_framework._types import FunctionResultContent
                         except ImportError:
                             from agent_framework import FunctionResultContent
                         
                         for content in event_message.contents:
-                            if isinstance(content, FunctionResultContent):
-                                if hasattr(content, 'result') and content.result:
-                                    result_data = content.result
-                                    if isinstance(result_data, dict):
-                                        extracted_objs.append(result_data)
-                                    elif isinstance(result_data, str):
-                                        try:
-                                            parsed = json.loads(result_data)
-                                            if isinstance(parsed, dict):
-                                                extracted_objs.append(parsed)
-                                        except json.JSONDecodeError:
-                                            pass
+                            try:
+                                if isinstance(content, FunctionResultContent) or hasattr(content, 'result'):
+                                    if hasattr(content, 'result') and getattr(content, 'result'):
+                                        result_data = getattr(content, 'result')
+                                        logger.debug(f"[Magentic] FunctionResultContent detected (type={type(result_data)})")
+                                        if isinstance(result_data, dict):
+                                            extracted_objs.append(result_data)
+                                        elif isinstance(result_data, str):
+                                            try:
+                                                parsed = json.loads(result_data)
+                                                if isinstance(parsed, dict):
+                                                    extracted_objs.append(parsed)
+                                            except json.JSONDecodeError:
+                                                multi = self._extract_json_objects(result_data)
+                                                if multi:
+                                                    extracted_objs.extend(obj for obj in multi if isinstance(obj, dict))
+                                if hasattr(content, 'text') and getattr(content, 'text'):
+                                    text_val = getattr(content, 'text')
+                                    logger.debug(f"[Magentic] Text content candidate length={len(text_val)} (chat phase)")
+                                    if ('{' in text_val and '}' in text_val) or ('[' in text_val and ']' in text_val):
+                                        objs = self._extract_json_objects(text_val)
+                                        if objs:
+                                            logger.debug(f"[Magentic] Extracted {len(objs)} JSON object(s) from text content")
+                                            extracted_objs.extend(obj for obj in objs if isinstance(obj, dict))
+                            except Exception as content_err:  # noqa: BLE001
+                                logger.debug(f"[Magentic] Content parsing error (chat): {content_err}")
             
             logger.info(f"[Magentic] Extracted {len(extracted_objs)} objects from function results")
             
@@ -1204,6 +1318,22 @@ STRICT RESPONSE CONSTRAINTS:
             
             tables_all = self._normalize_table_objects(extracted_objs)
             unique_tables = self._dedupe_tables(tables_all)
+
+            # Fallback buffer for chat path
+            if (not unique_tables) and TOOL_RESULTS_BUFFER:
+                buffered_tables: list[dict[str, Any]] = []
+                for entry in TOOL_RESULTS_BUFFER:
+                    table_obj = entry.get("table") if isinstance(entry, dict) else None
+                    if isinstance(table_obj, dict) and table_obj.get("columns") and table_obj.get("rows"):
+                        buffered_tables.append({
+                            "columns": table_obj.get("columns", []),
+                            "rows": table_obj.get("rows", []),
+                            "total_rows": table_obj.get("total_rows", len(table_obj.get("rows", [])))
+                        })
+                if buffered_tables:
+                    unique_tables = self._dedupe_tables(buffered_tables)
+                    logger.info(f"[Magentic] Chat fallback buffer recovered {len(unique_tables)} table(s)")
+                TOOL_RESULTS_BUFFER.clear()
             
             if unique_tables:
                 logger.info(f"[Magentic] Found {len(unique_tables)} unique tables")
