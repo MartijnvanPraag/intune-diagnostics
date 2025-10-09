@@ -14,9 +14,16 @@ Migration Notes:
 import json
 import logging
 import re
+import math
+import os
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, AsyncGenerator
+from numbers import Number
+try:  # numpy optional
+    import numpy as _np  # type: ignore
+except Exception:  # noqa: BLE001
+    _np = None
 
 # Logging is configured in main.py
 logger = logging.getLogger(__name__)
@@ -25,6 +32,119 @@ logger = logging.getLogger(__name__)
 # streaming events are not currently exposing function result payloads needed for
 # table reconstruction. This allows a fallback after workflow completion.
 TOOL_RESULTS_BUFFER: list[dict[str, Any]] = []
+
+# Scenario execution lock (generic) – when set, only queries belonging to the locked
+# scenario may be executed (whitespace/placeholder tolerant). This is NOT scenario-specific
+# logic; it is a generic isolation guard to ensure that if a scenario (e.g., one-query
+# compliance scenario) is selected, the agent does not autonomously chain unrelated
+# queries. Cleared implicitly when a new scenario lookup happens with ambiguous/low confidence.
+SCENARIO_LOCK: dict[str, Any] | None = None
+# Global allow list of all fenced kusto queries in instructions (patterns + hashes)
+GLOBAL_KUSTO_ALLOW: dict[str, Any] | None = None
+
+def _compile_placeholder_tolerant_pattern(templ: str) -> re.Pattern[str] | None:
+    """Return a compiled regex that tolerates placeholder substitution & arbitrary whitespace.
+
+    Rules:
+    - Any <PlaceholderName> becomes a non-greedy wildcard (.+?)
+    - All whitespace (spaces, newlines, tabs) collapses to \\s+
+    - Leading/trailing whitespace ignored
+    - DOTALL so multi-line queries match
+    """
+    try:
+        work = templ.replace('\r\n', '\n')
+        ph_tokens = re.findall(r"<[^<>]+>", work)
+        ph_map: dict[str,str] = {}
+        for idx, ph in enumerate(ph_tokens):
+            marker = f"__PH_{idx}__"
+            ph_map[marker] = ph
+            work = work.replace(ph, marker)
+        esc = re.escape(work)
+        for marker in ph_map.keys():
+            esc = esc.replace(re.escape(marker), r".+?")
+        # After escaping, whitespace/newlines represented as \n, space as space etc. Collapse any run of escaped ws tokens
+        esc = re.sub(r"(?:\\[nrtf]|\\ )+", r"\\s+", esc)
+        esc = re.sub(r"(?:\\s\+){2,}", r"\\s+", esc)
+        pattern_text = rf"^\s*{esc}\s*$"
+        return re.compile(pattern_text, re.DOTALL)
+    except re.error:
+        logger.warning("[ScenarioLock] Pattern compile failed length=%d", len(templ))
+        return None
+
+def _strip_leading_let_block(q: str) -> str:
+    """Remove a contiguous leading block of `let <identifier> = ...;` definitions.
+
+    This allows acceptance of queries where the agent prepends local variable declarations
+    (e.g., DeviceID, AccountID) before the canonical fenced query body.
+    """
+    lines = q.replace('\r\n','\n').split('\n')
+    out = []
+    skipping = True
+    for line in lines:
+        if skipping and re.match(r"^\s*let\s+[A-Za-z_][A-Za-z0-9_]*\s*=.*;\s*$", line):
+            continue
+        skipping = False
+        out.append(line)
+    return "\n".join(out)
+def _build_global_kusto_allow(instructions_path: Path) -> dict[str, Any]:
+    """Extract every fenced ```kusto block from instructions.md and build hash + regex patterns.
+
+    This ignores scenario structure and provides a canonical allow-list so ANY query that exactly
+    matches a fenced block (modulo placeholder substitution + whitespace) is accepted.
+    """
+    import hashlib as _hashlib, re as _re
+    text = instructions_path.read_text(encoding='utf-8')
+    blocks = _re.findall(r"```kusto\s*\n(.*?)\n```", text, _re.DOTALL | _re.IGNORECASE)
+    patterns: list[_re.Pattern[str]] = []
+    hashes: list[str] = []
+    originals: list[str] = []
+    for b in blocks:
+        qb = b.strip()
+        if not qb:
+            continue
+        originals.append(qb)
+        # placeholder tolerant pattern
+        templ = qb
+        placeholder_tokens = _re.findall(r"<[^<>]+>", templ)
+        ph_map: dict[str,str] = {}
+        for idx, ph in enumerate(placeholder_tokens):
+            marker = f"__PH_G_{idx}__"
+            ph_map[marker] = ph
+            templ = templ.replace(ph, marker)
+        esc = _re.escape(templ)
+        for marker, ph in ph_map.items():
+            esc = esc.replace(_re.escape(marker), r".+?")
+        esc = _re.sub(r"\\ +", r"\\s+", esc)
+        pattern_text = rf"^\s*{esc}\s*$"
+        try:
+            patterns.append(_re.compile(pattern_text, _re.DOTALL))
+        except _re.error:
+            pass
+        h = _hashlib.sha256(_normalize_query_for_hash(qb).encode('utf-8')).hexdigest()
+        hashes.append(h)
+    logger.info(f"[GlobalKustoAllow] Extracted {len(originals)} fenced kusto block(s)")
+    return {
+        'patterns': patterns,
+        'hashes': hashes,
+        'raw': originals
+    }
+
+def _normalize_query_for_hash(q: str) -> str:
+    """Produce a stable normalization for query hashing.
+
+    Steps:
+    - Convert CRLF to LF
+    - Strip leading/trailing whitespace
+    - Collapse runs of whitespace (space, tab, newline) to a single space
+    - Replace placeholder angle blocks <...> with canonical token <PH>
+    """
+    import re as _re
+    q2 = q.replace('\r\n', '\n')
+    # Replace placeholders with canonical marker
+    q2 = _re.sub(r"<[^<>]+>", "<PH>", q2)
+    # Collapse whitespace
+    q2 = _re.sub(r"\s+", " ", q2).strip()
+    return q2
 
 # Agent Framework imports (equivalent to Autogen)
 # The agent-framework package provides the core chat agent functionality
@@ -37,7 +157,7 @@ from agent_framework import (
 from agent_framework.azure import AzureOpenAIChatClient
 from models.schemas import ModelConfiguration
 from services.auth_service import auth_service
-from services.scenario_lookup_service import get_scenario_service
+# Legacy scenario_lookup_service import removed for semantic-only agent framework path
 from services.semantic_scenario_search import get_semantic_search
 
 
@@ -49,69 +169,266 @@ def create_scenario_lookup_function() -> Callable[..., Awaitable[str]]:
     """
     
     async def lookup_scenarios(user_request: str, max_scenarios: int = 3) -> str:
-        """Look up relevant diagnostic scenarios from instructions.md using semantic search.
-        
-        This tool uses AI embeddings to understand the semantic meaning of your request
-        and find matching diagnostic scenarios. Much better than keyword matching!
-        
-        Use this tool to find the appropriate Kusto queries for a user's diagnostic request.
-        This is the PRIMARY tool for finding diagnostic queries - ALWAYS use this first.
-        
-        Args:
-            user_request: The user's diagnostic request or keywords to search for
-            max_scenarios: Maximum number of scenarios to return (default: 3)
-            
-        Returns:
-            Matching diagnostic scenarios with their queries from instructions.md
+        """Hybrid semantic scenario lookup returning structured JSON + markdown.
+
+        ALWAYS returns a JSON object as the first line so the agent can parse reliably.
+        The JSON contains: status, query, scenarios (with scores, placeholders, penalties),
+        and recommended (single slug) unless ambiguous/low_confidence.
         """
         try:
-            # Get scenario service and semantic search
-            scenario_service = get_scenario_service()
             semantic_search = await get_semantic_search()
-            
-            # Log the user request for debugging
-            logger.info(f"[AgentFramework] Scenario lookup called with: '{user_request}'")
-            
-            # Try semantic search first (if initialized)
-            if semantic_search and semantic_search._initialized:
-                logger.info(f"[AgentFramework] Using semantic search for scenario lookup")
-                matching_titles = semantic_search.search(user_request, max_scenarios)
+            logger.info(f"[AgentFramework] Scenario lookup (semantic-only) called with: '{user_request}'")
+            if not semantic_search or not semantic_search._initialized:
+                return json.dumps({
+                    "status": "not_ready",
+                    "query": user_request,
+                    "message": "Semantic search not initialized",
+                    "scenarios": []
+                })
+
+            scored = semantic_search.search_with_scores(user_request, max_results=max_scenarios)
+            if not scored:
+                return json.dumps({
+                    "status": "no_match",
+                    "query": user_request,
+                    "scenarios": [],
+                    "message": "No matching scenarios"
+                }) + "\nNo matching scenarios."
+
+            # Attach human titles & queries
+            def _json_safe(value: Any) -> Any:
+                """Recursively convert values to JSON-serializable Python primitives.
+
+                Handles numpy scalars, floats (including NaN/inf), and nested containers.
+                """
+                # Numpy scalar
+                if _np is not None and isinstance(value, (_np.generic,)):
+                    return value.item()
+                # Basic primitives
+                if isinstance(value, (str, bool)) or value is None:
+                    return value
+                if isinstance(value, (int,)):
+                    return int(value)
+                if isinstance(value, float):
+                    if math.isnan(value) or math.isinf(value):
+                        return None
+                    return float(value)
+                # Support common numeric extras without broad Number which confuses type checkers
+                try:
+                    from decimal import Decimal
+                    if isinstance(value, Decimal):
+                        return float(value)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    from fractions import Fraction
+                    if isinstance(value, Fraction):
+                        return float(value)
+                except Exception:  # noqa: BLE001
+                    pass
+                if isinstance(value, dict):
+                    return {str(k): _json_safe(v) for k, v in value.items()}
+                if isinstance(value, (list, tuple, set)):
+                    return [_json_safe(v) for v in value]
+                return str(value)
+
+            detailed_payload: list[dict[str, Any]] = []
+            for s in scored:
+                norm_title = s['normalized_title']
+                scenario = semantic_search.get_scenario_by_normalized(norm_title)
+                if scenario:
+                    merged = {
+                        **s,
+                        'title': scenario.get('title'),
+                        'queries': scenario.get('queries', []),
+                        'query_count': len(scenario.get('queries', []))
+                    }
+                    detailed_payload.append(_json_safe(merged))
+                else:
+                    detailed_payload.append(_json_safe(s))
+
+            # Determine status with tie-break heuristics for compliance vs policy ambiguity
+            status = 'ok'
+            recommended = None
+            margin = None
+            if len(detailed_payload) >= 2:
+                margin = detailed_payload[0]['score'] - detailed_payload[1]['score']
+                if margin < 0.05:
+                    # Potential ambiguity – apply heuristics to break tie instead of defaulting to ambiguous
+                    top = detailed_payload[0]
+                    second = detailed_payload[1]
+                    qtext_lower = user_request.lower()
+                    def _is_compliance_candidate(item: dict[str, Any]) -> bool:
+                        nt = item.get('normalized_title','')
+                        title = item.get('title','').lower()
+                        return ('compliance' in nt) or ('compliance' in title)
+                    def _is_policy_candidate(item: dict[str, Any]) -> bool:
+                        nt = item.get('normalized_title','')
+                        title = item.get('title','').lower()
+                        return ('policy' in nt) or ('policy' in title) or ('setting' in title)
+                    # Heuristic 1: If both compliance and policy present & user mentions 'compliance' but not 'setting' or 'assignment', prefer compliance
+                    user_mentions_setting_like = any(k in qtext_lower for k in ['setting','assignment','assignments'])
+                    if _is_compliance_candidate(top) and _is_policy_candidate(second) and not user_mentions_setting_like:
+                        # keep top
+                        pass
+                    elif _is_compliance_candidate(second) and _is_policy_candidate(top) and not user_mentions_setting_like:
+                        # swap preference to compliance
+                        detailed_payload[0], detailed_payload[1] = detailed_payload[1], detailed_payload[0]
+                        margin = detailed_payload[0]['score'] - detailed_payload[1]['score']
+                    else:
+                        # Heuristic 2: If scores nearly identical (<0.02) choose simpler (fewer queries) scenario
+                        if margin < 0.02:
+                            if second.get('query_count', 0) == 1 and top.get('query_count', 0) > 1:
+                                detailed_payload[0], detailed_payload[1] = detailed_payload[1], detailed_payload[0]
+                                margin = detailed_payload[0]['score'] - detailed_payload[1]['score']
+                            elif top.get('query_count', 0) == 1 and second.get('query_count', 0) > 1:
+                                # Already simplest on top
+                                pass
+                            # Heuristic 3: Favor scenario whose title directly contains all non-stopword compliance tokens when user query contains 'compliance'
+                            elif 'compliance' in qtext_lower:
+                                # If second has compliance token and first does not, swap
+                                if _is_compliance_candidate(second) and not _is_compliance_candidate(top):
+                                    detailed_payload[0], detailed_payload[1] = detailed_payload[1], detailed_payload[0]
+                                    margin = detailed_payload[0]['score'] - detailed_payload[1]['score']
+                    # After heuristics, if still very close (<0.015) treat as ambiguous; else proceed
+                    if margin is not None and margin < 0.015:
+                        status = 'ambiguous'
+                # end margin check
+            # Low confidence override
+            if detailed_payload and detailed_payload[0]['score'] < 0.45:
+                status = 'low_confidence'
+            if status == 'ok':
+                recommended = detailed_payload[0]['normalized_title']
+            if status == 'ambiguous':
+                logger.info("[ScenarioLookup] Ambiguous after heuristics (margin=%s) top=%s second=%s", margin, detailed_payload[0]['title'], detailed_payload[1]['title'])
+            # Build / update scenario lock if we have a confident single recommendation
+            global SCENARIO_LOCK
+            # Ensure global allow list is initialized
+            global GLOBAL_KUSTO_ALLOW
+            if GLOBAL_KUSTO_ALLOW is None:
+                try:
+                    GLOBAL_KUSTO_ALLOW = _build_global_kusto_allow(semantic_search.instructions_path)
+                except Exception as gerr:  # noqa: BLE001
+                    logger.warning(f"[GlobalKustoAllow] Failed to build: {gerr}")
+
+            if recommended:
+                try:
+                    # Retrieve full scenario for query templates
+                    scenario = semantic_search.get_scenario_by_normalized(recommended)
+                    scenario_queries = scenario.get('queries', []) if scenario else []
+                    # Fallback: if parser yielded zero queries (e.g., single inline block not captured),
+                    # re-extract from raw instructions section using a lightweight regex.
+                    if scenario and not scenario_queries:
+                        # The semantic parser may have dropped code fences; re-read instructions.md section via title search
+                        try:
+                            instructions_text = semantic_search.instructions_path.read_text(encoding='utf-8')
+                            import re as _re
+                            scen_title = scenario.get('title') or ''
+                            if scen_title:
+                                pattern = _re.compile(rf"###\s+{_re.escape(scen_title)}\s+(.*?)(?=\n### |\Z)", _re.DOTALL)
+                                m = pattern.search(instructions_text)
+                                if m:
+                                    section_text = m.group(1)
+                                    code_blocks = _re.findall(r"```kusto\s*\n(.*?)\n```", section_text, _re.DOTALL)
+                                    if code_blocks:
+                                        scenario_queries = [cb.strip() for cb in code_blocks if cb.strip()]
+                                        logger.info(
+                                            "[ScenarioLock][Fallback] Extracted %d query block(s) directly from instructions for '%s'",
+                                            len(scenario_queries), scen_title
+                                        )
+                        except Exception as fb_err:  # noqa: BLE001
+                            logger.warning(f"[ScenarioLock][Fallback] Failed inline extraction: {fb_err}")
+                    # Compile tolerant regex patterns using unified helper
+                    patterns: list[re.Pattern[str]] = []
+                    for qt in scenario_queries:
+                        pat = _compile_placeholder_tolerant_pattern(qt)
+                        if pat:
+                            patterns.append(pat)
+                    # Build hash list for stable enforcement (include function-only variants if applicable)
+                    import hashlib as _hashlib
+                    hashes: list[str] = []
+                    # Collect potential variant queries (original + function-only when pattern recognized)
+                    variant_queries: list[str] = []
+                    func_variant_added = 0
+                    func_call_regex = re.compile(r"cluster\(.*?\)\.database\(.*?\)\.([A-Za-z0-9_]+\(.*\))\s*$", re.DOTALL)
+                    enable_variants = os.getenv("ENABLE_FUNCTION_VARIANTS", "1") == "1"
+                    for original_q in scenario_queries:
+                        variant_queries.append(original_q)
+                        if enable_variants:
+                            mfun = func_call_regex.search(original_q)
+                            if mfun:
+                                core_call = mfun.group(1).strip()
+                                if core_call not in variant_queries:
+                                    variant_queries.append(core_call)
+                                    func_variant_added += 1
+                                    pat_core = _compile_placeholder_tolerant_pattern(core_call)
+                                    if pat_core:
+                                        patterns.append(pat_core)
+                    if func_variant_added:
+                        logger.info(f"[ScenarioLock] Added {func_variant_added} function-only variant(s) for scenario '{recommended}'")
+                    for oq in variant_queries:
+                        norm = _normalize_query_for_hash(oq)
+                        h = _hashlib.sha256(norm.encode('utf-8')).hexdigest()
+                        if h not in hashes:
+                            hashes.append(h)
+                    SCENARIO_LOCK = {
+                        'scenario': recommended,
+                        'patterns': patterns,
+                        'query_count': len(patterns),
+                        'strict': True,
+                        'title': scenario.get('title') if scenario else recommended,
+                        'extracted_queries': scenario_queries,
+                        'hashes': hashes,
+                    }
+                    parser_original = len(scenario.get('queries', [])) if scenario else -1
+                    variant_ct = max(0, len(patterns) - parser_original) if parser_original >=0 else 0
+                    logger.info(
+                        "[ScenarioLock] Locked to scenario '%s' with %d allowed pattern(s) (%d original + %d variant); parser_original=%d hash_count=%d",
+                        SCENARIO_LOCK['title'], len(patterns), parser_original, variant_ct, parser_original, len(hashes)
+                    )
+                    if not patterns:
+                        logger.warning(
+                            "[ScenarioLock] No queries captured for scenario '%s' – scenario-level enforcement inactive; global allow-list still applies.",
+                            SCENARIO_LOCK['title']
+                        )
+                except Exception as lock_err:  # noqa: BLE001
+                    logger.warning(f"[ScenarioLock] Failed to establish lock: {lock_err}")
             else:
-                # Fallback to keyword-based search
-                logger.warning(f"[AgentFramework] Semantic search not available, using keyword fallback")
-                matching_titles = scenario_service.find_scenarios_by_keywords(user_request, max_scenarios)
-            
-            logger.info(f"[AgentFramework] Found matching scenarios: {matching_titles}")
-            
-            if not matching_titles:
-                available = scenario_service.list_all_scenario_titles()
-                logger.warning(f"[AgentFramework] No matching scenarios found. Available: {available}")
-                return "No matching diagnostic scenarios found. Available scenarios: " + \
-                       ", ".join(available)
-            
-            # Get detailed scenarios
-            scenarios = scenario_service.get_scenarios_by_titles(matching_titles)
-            
-            # Format response
-            response_parts = ["Found matching diagnostic scenarios:\n"]
-            
-            for i, scenario in enumerate(scenarios, 1):
-                response_parts.append(f"## {i}. {scenario.title}")
-                response_parts.append(f"**Description:** {scenario.description}")
-                response_parts.append("**Queries:**")
-                
-                for j, query in enumerate(scenario.queries, 1):
-                    response_parts.append(f"```kusto\n{query}\n```")
-                
-                response_parts.append("")  # Add spacing
-            
-            result = "\n".join(response_parts)
-            logger.info(f"[AgentFramework] Returning {len(scenarios)} scenarios with {sum(len(s.queries) for s in scenarios)} queries")
-            return result
-            
-        except Exception as e:
+                # Ambiguous / low confidence – clear lock to allow disambiguation
+                if SCENARIO_LOCK is not None:
+                    logger.info("[ScenarioLock] Cleared due to ambiguous or low confidence lookup result")
+                SCENARIO_LOCK = None
+
+            result_obj = _json_safe({
+                'status': status,
+                'query': user_request,
+                'recommended': recommended,
+                'scenarios': detailed_payload
+            })
+
+            # Markdown summary for readability
+            md_lines = ["# Scenario Suggestions", f"Status: {status}"]
+            if status != 'ok':
+                md_lines.append("(Agent should confirm or ask clarifying question.)")
+            for i, s in enumerate(detailed_payload, 1):
+                md_lines.append(f"## {i}. {s.get('title', s['normalized_title'])} (score={s['score']})")
+                if 'queries' in s:
+                    for q in s['queries'][:2]:  # show at most first 2 queries preview
+                        preview = q.split('\n')[0][:100]
+                        md_lines.append(f"`{preview}...`")
+                if s.get('placeholders'):
+                    missing = s.get('missing_placeholders') or []
+                    md_lines.append(f"Placeholders: {s['placeholders']}  Missing: {missing}")
+            md_output = "\n".join(md_lines)
+
+            return json.dumps(result_obj) + "\n" + md_output
+        except Exception as e:  # noqa: BLE001
             logger.error(f"[AgentFramework] Error in scenario lookup: {e}")
-            return f"Error looking up scenarios: {str(e)}"
+            return json.dumps({
+                "status": "error",
+                "query": user_request,
+                "error": str(e)
+            })
     
     # Set function metadata for proper tool registration
     lookup_scenarios.__name__ = "lookup_scenarios"
@@ -227,6 +544,82 @@ def create_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[
                     logger.info(f"[AgentFramework] Query length: {len(query)} characters")
                     logger.info(f"[AgentFramework] Query (first 500 chars): {query[:500]}...")
                     
+                    # Pass parameters directly to MCP server – but first enforce scenario lock if present
+                    global SCENARIO_LOCK
+                    enforced = False
+                    if SCENARIO_LOCK and SCENARIO_LOCK.get('strict'):
+                        enforced = True
+                        substituted_query = query
+                        norm_full = _normalize_query_for_hash(substituted_query)
+                        import hashlib as _hashlib
+                        h_full = _hashlib.sha256(norm_full.encode('utf-8')).hexdigest()
+                        patterns: list[re.Pattern[str]] = SCENARIO_LOCK.get('patterns') or []
+                        normalized_incoming = substituted_query.replace('\r\n','\n').strip()
+                        match_ok = any(p.fullmatch(normalized_incoming) for p in patterns)
+                        hash_ok = h_full in (SCENARIO_LOCK.get('hashes') or [])
+                        if not (match_ok or hash_ok):
+                            # Try global allow list
+                            global GLOBAL_KUSTO_ALLOW
+                            global_ok = False
+                            if GLOBAL_KUSTO_ALLOW:
+                                g_patterns: list[re.Pattern[str]] = GLOBAL_KUSTO_ALLOW.get('patterns') or []
+                                g_hashes = GLOBAL_KUSTO_ALLOW.get('hashes') or []
+                                g_match = any(p.fullmatch(normalized_incoming) for p in g_patterns)
+                                g_hash_ok = h_full in g_hashes
+                                global_ok = g_match or g_hash_ok
+                                if global_ok:
+                                    logger.info("[GlobalKustoAllow] Accepted query outside scenario lock via global fenced allow-list")
+                            # Fallback 1: Strip leading let block and re-test hash against scenario / global raws
+                            if not (match_ok or hash_ok or global_ok):
+                                stripped = _strip_leading_let_block(substituted_query)
+                                norm_stripped = _normalize_query_for_hash(stripped)
+                                scen_raws = (SCENARIO_LOCK.get('extracted_queries') or [])
+                                scen_raw_hashes = { _hashlib.sha256(_normalize_query_for_hash(r).encode('utf-8')).hexdigest() for r in scen_raws }
+                                if norm_stripped and _hashlib.sha256(norm_stripped.encode('utf-8')).hexdigest() in scen_raw_hashes:
+                                    logger.info("[ScenarioLock] Accepted via stripped-let canonical hash match")
+                                    match_ok = True
+                                elif GLOBAL_KUSTO_ALLOW:
+                                    g_raws = GLOBAL_KUSTO_ALLOW.get('raw') or []
+                                    g_raw_hashes = { _hashlib.sha256(_normalize_query_for_hash(r).encode('utf-8')).hexdigest() for r in g_raws }
+                                    if norm_stripped and _hashlib.sha256(norm_stripped.encode('utf-8')).hexdigest() in g_raw_hashes:
+                                        logger.info("[GlobalKustoAllow] Accepted via stripped-let canonical hash match")
+                                        global_ok = True
+                            # Fallback 2: Substring canonical detection (normalized containment)
+                            if not (match_ok or hash_ok or global_ok):
+                                norm_candidate = _normalize_query_for_hash(substituted_query)
+                                accepted_sub = False
+                                # Check scenario raws then global raws
+                                def _contains(raw_list: list[str]) -> bool:
+                                    for raw in raw_list:
+                                        nraw = _normalize_query_for_hash(raw)
+                                        if nraw and nraw in norm_candidate:
+                                            # Require ratio to avoid trivial acceptance
+                                            if len(nraw) >= 40:  # heuristic length gate
+                                                return True
+                                    return False
+                                if _contains(SCENARIO_LOCK.get('extracted_queries') or []):
+                                    logger.info("[ScenarioLock] Accepted via normalized substring canonical match")
+                                    accepted_sub = True
+                                elif GLOBAL_KUSTO_ALLOW and _contains(GLOBAL_KUSTO_ALLOW.get('raw') or []):
+                                    logger.info("[GlobalKustoAllow] Accepted via normalized substring canonical match")
+                                    accepted_sub = True
+                                if accepted_sub:
+                                    match_ok = True
+                            if not global_ok:
+                                if not match_ok:
+                                    logger.warning(
+                                        "[ScenarioLock] Rejected query (no pattern/hash/global/substr match) scenario='%s' sha256=%s norm_prefix='%s' patterns=%d hashes=%d global_patterns=%d", 
+                                        SCENARIO_LOCK.get('title'), h_full, norm_full[:120], len(patterns), len(SCENARIO_LOCK.get('hashes') or []), len((GLOBAL_KUSTO_ALLOW or {}).get('patterns') or [])
+                                    )
+                                    # Clear lock to prevent repeated looping retries
+                                    SCENARIO_LOCK = None
+                                    return json.dumps({
+                                        'success': False,
+                                        'error': 'Query rejected: not recognized (scenario/global canonical mismatch). Lock cleared to prevent loop.',
+                                        'scenario_locked': None,
+                                        'allowed_queries': 0,
+                                        'guidance': 'Re-issue a scenario lookup or paste an exact fenced query from instructions.md.'
+                                    })
                     # Pass parameters directly to MCP server
                     mcp_args = {
                         "clusterUrl": normalized_cluster_url,
@@ -237,7 +630,33 @@ def create_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[
                     
                     try:
                         result = await kusto_service._session.call_tool(tool_name, mcp_args)
+                        # Raw logging (size-limited) BEFORE normalization
+                        try:
+                            raw_repr = getattr(result, 'content', None)
+                            if raw_repr is not None:
+                                # Build a concise preview
+                                parts = []
+                                for itm in raw_repr:  # type: ignore
+                                    t = getattr(itm, 'text', None)
+                                    if t:
+                                        parts.append(t[:200])
+                                    if len(parts) >= 3:
+                                        break
+                                logger.info("[KustoMCP][RawResponse] parts=%d preview=%s", len(raw_repr), " | ".join(parts))
+                            else:
+                                logger.info("[KustoMCP][RawResponse] result_has_no_content_attr type=%s", type(result))
+                        except Exception as rl_err:  # noqa: BLE001
+                            logger.debug(f"[KustoMCP][RawResponse] logging failed: {rl_err}")
                         normalized = kusto_service._normalize_tool_result(result)
+                        # Post-normalization debug path
+                        if not normalized.get('success'):
+                            logger.warning("[KustoMCP][NormalizedError] %s", normalized.get('error'))
+                        else:
+                            _tbl = normalized.get('table') or {}
+                            _cols = _tbl.get('columns') or []
+                            logger.info("[KustoMCP][NormalizedSuccess] rows=%s cols=%d", 
+                                        _tbl.get('total_rows'), 
+                                        len(_cols))                    
                     except Exception as e:
                         logger.error(f"[AgentFramework] MCP call_tool failed: {type(e).__name__}: {e}")
                         logger.error(f"[AgentFramework] Tool: {tool_name}, Database: {database}")
@@ -308,84 +727,97 @@ class AgentFrameworkService:
         self.magentic_workflow: Any | None = None  # MagenticWorkflow instance
         self.chat_client: AzureOpenAIChatClient | None = None
         
-        # Force reload scenarios to ensure we have the latest matching logic
-        from services.scenario_lookup_service import reload_scenarios
-        reload_scenarios()
-        self.scenario_service = get_scenario_service()
-        
+        # Semantic-only mode: legacy scenario service disabled
+        self.scenario_service = None
         logger.info("AgentFrameworkService initialized (Agent Framework implementation)")
 
     def list_instruction_scenarios(self) -> list[dict[str, Any]]:
         """Return a lightweight summary of parsed instruction scenarios."""
-        scenario_titles = self.scenario_service.list_all_scenario_titles()
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            semantic_search = loop.run_until_complete(get_semantic_search()) if not loop.is_running() else None
+        except Exception:
+            semantic_search = None
         scenarios = []
-        
-        for idx, title in enumerate(scenario_titles):
-            scenario = self.scenario_service.get_scenario_by_title(title)
-            if scenario:
+        if semantic_search and getattr(semantic_search, '_initialized', False):
+            for idx, sc in enumerate(semantic_search.get_all_scenarios()):
                 scenarios.append({
                     "index": idx,
-                    "title": scenario.title,
-                    "query_count": len(scenario.queries),
-                    "description": scenario.description.split("\n")[0][:160] if scenario.description else ""
+                    "title": sc.get('title'),
+                    "query_count": len(sc.get('queries', [])),
+                    "description": (sc.get('description','').split('\n')[0][:160]) if sc.get('description') else ""
                 })
-        
+            return scenarios
+        # Legacy fallback removed (semantic-only)
         return scenarios
 
     async def run_instruction_scenario(self, scenario_ref: int | str) -> dict[str, Any]:
-        """Execute all queries in a referenced scenario
-        
-        Maintains compatibility with Autogen implementation by executing
-        scenarios directly through the Kusto MCP service.
-        """
-        try:
-            scenario_titles = self.scenario_service.list_all_scenario_titles()
-            
-            if not scenario_titles:
-                raise ValueError("No scenarios available")
+        """Execute a scenario using semantic search index only.
 
-            scenario = None
+        Args:
+            scenario_ref: Index (int) from list_instruction_scenarios ordering or a (partial) title string.
+        Returns:
+            Dict with scenario metadata, tables, summary, errors.
+        """
+        from services.semantic_scenario_search import get_semantic_search  # local import
+        try:
+            semantic_search = await get_semantic_search()
+            if not getattr(semantic_search, '_initialized', False):
+                raise ValueError("Semantic scenario index not initialized")
+            scenarios = semantic_search.get_all_scenarios()
+            if not scenarios:
+                raise ValueError("No scenarios indexed")
+
+            target = None
             if isinstance(scenario_ref, int):
-                if 0 <= scenario_ref < len(scenario_titles):
-                    title = scenario_titles[scenario_ref]
-                    scenario = self.scenario_service.get_scenario_by_title(title)
+                if 0 <= scenario_ref < len(scenarios):
+                    target = scenarios[scenario_ref]
             else:
-                # Find by title
-                scenario = self.scenario_service.get_scenario_by_title(scenario_ref)
-                
-                # If not found, try partial match
-                if not scenario:
-                    ref_lower = scenario_ref.lower()
-                    for title in scenario_titles:
-                        if ref_lower in title.lower():
-                            scenario = self.scenario_service.get_scenario_by_title(title)
+                ref_lower = str(scenario_ref).lower()
+                for sc in scenarios:
+                    title_lower = sc.get('title', '').lower()
+                    norm = sc.get('normalized_title', title_lower)
+                    if ref_lower == title_lower or ref_lower == norm:
+                        target = sc
+                        break
+                if target is None:
+                    for sc in scenarios:
+                        if ref_lower in sc.get('title', '').lower():
+                            target = sc
                             break
 
-            if scenario is None:
+            if target is None:
                 raise ValueError(f"Scenario not found: {scenario_ref}")
 
+            queries = target.get('queries', []) or []
             from services.kusto_mcp_service import get_kusto_service
             kusto_service = await get_kusto_service()
 
             tables: list[dict[str, Any]] = []
             errors: list[str] = []
-            for idx, query in enumerate(scenario.queries):
-                res = await kusto_service.execute_kusto_query(query)
-                if res.get("success"):
-                    tables.append(res.get("table", {"columns": ["Result"], "rows": [["(empty)"]], "total_rows": 0}))
-                else:
-                    err = res.get("error", "Unknown error")
-                    errors.append(f"Query {idx+1}: {err}")
+            for idx, query in enumerate(queries):
+                try:
+                    res = await kusto_service.execute_kusto_query(query)
+                    if res.get("success"):
+                        tables.append(res.get("table", {"columns": ["Result"], "rows": [["(empty)"]], "total_rows": 0}))
+                    else:
+                        err = res.get("error", "Unknown error")
+                        errors.append(f"Query {idx+1}: {err}")
+                        tables.append({"columns": ["Error"], "rows": [[err]], "total_rows": 1})
+                except Exception as qerr:  # noqa: BLE001
+                    err = f"Query {idx+1} execution exception: {qerr}"
+                    errors.append(err)
                     tables.append({"columns": ["Error"], "rows": [[err]], "total_rows": 1})
 
-            summary_parts = [f"Scenario: {scenario.title} ({len(tables)} queries)"]
+            summary_parts = [f"Scenario: {target.get('title')} ({len(tables)} queries)"]
             if errors:
                 summary_parts.append(f"{len(errors)} query errors encountered.")
             summary = " \n".join(summary_parts)
 
             return {
-                "scenario": scenario.title,
-                "description": scenario.description,
+                "scenario": target.get('title'),
+                "description": target.get('description', ''),
                 "tables": tables,
                 "summary": summary,
                 "errors": errors,
@@ -419,11 +851,15 @@ class AgentFrameworkService:
             # Prewarm MCP sessions with cluster/database pairs
             try:
                 all_queries: list[str] = []
-                scenario_titles = agent_framework_service.scenario_service.list_all_scenario_titles()
-                for title in scenario_titles:
-                    scenario = agent_framework_service.scenario_service.get_scenario_by_title(title)
-                    if scenario:
-                        all_queries.extend(scenario.queries)
+                # Gather queries from semantic search scenarios
+                try:
+                    from services.semantic_scenario_search import get_semantic_search as _gss
+                    ss = await _gss()
+                    if getattr(ss, '_initialized', False):
+                        for sc in ss.get_all_scenarios():
+                            all_queries.extend(sc.get('queries', []) or [])
+                except Exception as ss_err:  # noqa: BLE001
+                    logger.warning(f"Semantic search unavailable during prewarm: {ss_err}")
                 
                 if all_queries:
                     import re
@@ -469,21 +905,27 @@ class AgentFrameworkService:
     async def _load_instructions(self) -> None:
         """Initialize scenario service (scenarios are loaded automatically)"""
         try:
-            scenario_titles = self.scenario_service.list_all_scenario_titles()
-            logger.info(f"Loaded {len(scenario_titles)} instruction scenarios")
+            # Use semantic search summary when available
+            semantic_search = await get_semantic_search()
+            if semantic_search and semantic_search._initialized:
+                logger.info("Semantic scenario index ready")
+            # Legacy scenario service removed; no fallback listing
         except Exception as e:
-            logger.warning(f"Failed to load instruction scenarios: {e}")
+            logger.warning(f"Failed to load instruction scenarios (semantic-only): {e}")
     
-    def reload_scenarios(self) -> None:
-        """Reload scenarios from instructions.md"""
+    async def reload_scenarios(self) -> None:
+        """Reload scenarios (semantic-only) by re-running semantic search initialization.
+
+        Note: Current SemanticScenarioSearch does not expose a forced rebuild flag; calling initialize()
+        again is idempotent and will reuse cache unless underlying instructions changed.
+        """
         try:
-            from services.scenario_lookup_service import reload_scenarios
-            reload_scenarios()
-            self.scenario_service = get_scenario_service()
-            scenario_titles = self.scenario_service.list_all_scenario_titles()
-            logger.info(f"Reloaded {len(scenario_titles)} instruction scenarios")
-        except Exception as e:
-            logger.error(f"Failed to reload scenarios: {e}")
+            from services.semantic_scenario_search import get_semantic_search
+            ss = await get_semantic_search()
+            await ss.initialize()
+            logger.info("Semantic scenario index reloaded (idempotent initialize)")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Failed to reload semantic scenarios: {e}")
     
     async def _validate_authentication(self) -> None:
         """Proactively validate authentication tokens"""
@@ -559,6 +1001,19 @@ class AgentFrameworkService:
                 context_function = create_context_lookup_function()
                 tools.append(context_function)
                 logger.info("Added context lookup tool")
+
+                # Add scenario lock reset tool
+                async def reset_scenario_lock() -> str:  # type: ignore
+                    """Clear active scenario lock (allows selecting a new scenario)."""
+                    global SCENARIO_LOCK
+                    if SCENARIO_LOCK:
+                        prev = SCENARIO_LOCK.get('title')
+                        SCENARIO_LOCK = None
+                        return f"Scenario lock cleared (was: {prev})."
+                    return "No active scenario lock."
+                reset_scenario_lock.__name__ = "reset_scenario_lock"
+                tools.append(reset_scenario_lock)
+                logger.info("Added reset_scenario_lock tool")
                 
                 for mcp_tool in mcp_tools:
                     tool_name = mcp_tool.name
@@ -579,17 +1034,25 @@ class AgentFrameworkService:
             return []
     
     async def create_intune_expert_agent(self, model_config: ModelConfiguration) -> ChatAgent:
-        """Create the IntuneExpert agent using Agent Framework
-        
-        This creates a ChatAgent with the same capabilities as the Autogen
-        AssistantAgent, including MCP tools and scenario lookup.
+        """Create the IntuneExpert agent using Agent Framework.
+
+        Builds system instructions dynamically (awaiting semantic summary first).
         """
         logger.info("Creating Intune Expert agent with Kusto MCP tools (Agent Framework)")
-        
-        # Create the Azure OpenAI chat client
+
         chat_client = self._create_azure_chat_client(model_config)
-        
-        # System instructions (same as Autogen version)
+
+        # Build semantic summary safely (semantic search may not be ready)
+        try:
+            ss = await get_semantic_search()
+            if getattr(ss, '_initialized', False):
+                semantic_summary = ss.build_summary()
+            else:
+                semantic_summary = 'Semantic scenario index not yet initialized'
+        except Exception as _ssi:
+            logger.warning(f"Failed to build semantic summary: {_ssi}")
+            semantic_summary = 'Semantic scenario index unavailable'
+
         system_instructions = f"""
         You are an Intune Expert agent specializing in Microsoft Intune diagnostics and troubleshooting.
         
@@ -601,8 +1064,14 @@ class AgentFrameworkService:
     - They are NOT user facts, NOT products, and NOT part of the Intune diagnostic domain.
     - Do NOT list them under GIVEN FACTS or treat them as entities that require lookup or explanation.
         
-        AVAILABLE DIAGNOSTIC SCENARIOS:
-        {self.scenario_service.get_scenario_summary()}
+        AVAILABLE DIAGNOSTIC SCENARIOS (Semantic Index):
+    {semantic_summary}
+
+    SEMANTIC-ONLY MODE:
+    - Legacy keyword scenario lookup has been removed in this Agent Framework path.
+    - All scenario discovery MUST use the lookup_scenarios tool which returns JSON first line.
+    - Do NOT attempt to reference legacy scenario services or summaries.
+    - If semantic index not ready, inform the user and avoid fabricating scenarios.
         
         NATURAL LANGUAGE UNDERSTANDING:
         - Interpret user requests naturally without requiring specific keywords or parameters
@@ -610,11 +1079,15 @@ class AgentFrameworkService:
         - Use the lookup_scenarios tool to find relevant diagnostic scenarios based on user intent
         - Execute only the queries provided by the lookup_scenarios tool - do not create your own queries
         
-        MANDATORY WORKFLOW (MUST FOLLOW IN ORDER):
+          MANDATORY WORKFLOW (MUST FOLLOW IN ORDER):
         1. ALWAYS call lookup_scenarios first with the user's request text
         2. If the scenario requires context from previous queries, call lookup_context to get stored values
-        3. Execute ONLY the queries returned by lookup_scenarios using MCP tools
-        4. Return results in table format as specified in instructions.md
+          3. When a single recommended scenario is returned, a SCENARIO LOCK is applied:
+              - Only the exact canonical query text (ignoring placeholder substitution + whitespace) is permitted.
+              - Any other query attempts MUST be rejected (the system enforces this automatically).
+          4. To intentionally switch scope, first call reset_scenario_lock THEN perform a new lookup_scenarios call.
+          5. Execute ONLY the canonical scenario query/queries after lock; do NOT invent supportive queries.
+          6. Return results in table format as specified in instructions.md
         
         DO NOT:
         - Create your own queries or speculation
@@ -634,11 +1107,12 @@ class AgentFrameworkService:
         - For follow-up questions, use lookup_context if you need to check what context is available
         - If needed context is missing, ask the user to provide the required identifiers
         
-        KUSTO QUERY EXECUTION:
-        - Use ONLY the queries provided by lookup_scenarios
-        - The system will automatically substitute stored context values
-        - The MCP server provides various tools for executing Kusto queries
-        - Always use the appropriate cluster URLs and database names from the scenario queries
+    KUSTO QUERY EXECUTION & ENFORCEMENT:
+    - Use ONLY the canonical queries from the selected scenario (enforced via pattern + hash verification).
+    - DO NOT attempt to generate alternative or exploratory queries unless user explicitly asks to broaden scope.
+    - To broaden scope, call reset_scenario_lock and perform a fresh scenario lookup with clarified intent.
+    - Placeholder values (<DeviceId>, <AccountId>, etc.) are auto-substituted from context.
+    - If a query is rejected, explain to the user that it is outside the locked scenario and offer to unlock.
         
         RESPONSE FORMAT (MANDATORY):
         1. Always return a TABLE first (raw results as markdown)
@@ -666,16 +1140,8 @@ class AgentFrameworkService:
         
         # Discover and create tools from MCP server
         tools = await self._discover_mcp_tools()
-        
-        # Create the agent with tools
-        agent = ChatAgent(
-            chat_client=chat_client,
-            instructions=system_instructions,
-            tools=tools
-        )
-        
+        agent = ChatAgent(chat_client=chat_client, instructions=system_instructions, tools=tools)
         logger.info("IntuneExpert agent created successfully with Kusto tools (Agent Framework)")
-        
         return agent
 
     # --- Post-processing helpers (same as Autogen implementation) ---------
@@ -970,12 +1436,13 @@ class AgentFrameworkService:
                 start_time = parameters.get("start_time") or parameters.get("start")
                 end_time = parameters.get("end_time") or parameters.get("end")
                 timeline_instructions = (
-                    "You are an Intune diagnostics expert. Build a chronological device event timeline covering compliance status changes, policy assignment or evaluation outcomes, application install attempts (success/failure), device check-ins (including failures or long gaps), enrollment/sync events, and notable error events for the specified device and time window.\n"
-                    "1. Discover and aggregate relevant events via available tools / queries.\n"
-                    "2. Normalize timestamps to UTC ISO8601 (YYYY-MM-DD HH:MM).\n"
-                    "3. Group logically similar rapid events but keep important state transitions explicit.\n"
-                    "4. Output a concise narrative summary first (outside code fence).\n"
-                    "5. Then output EXACTLY ONE fenced mermaid code block using the 'timeline' syntax:```mermaid\\ntimeline\nTitle: Device Timeline (DEVICE_ID)\nStart: <earliest timestamp>\n<YYYY-MM-DD HH:MM>: <Category> - <Brief description>\n...\n```\n"
+                    "Build a chronological device event timeline covering compliance status changes, policy assignment or evaluation outcomes, application install attempts (success/failure), device check-ins (including failures or long gaps), enrollment/sync events, and notable error events for the specified device and time window.\n"
+                    "1. Use the \"Advanced Scenario: Device Timeline\" scenario from instructions.md to construct the device timeline. Run all Kusto queries in this scenario in sequence.\n"
+                    "2. Discover and aggregate relevant events via available tools / queries.\n"
+                    "3. Normalize timestamps to UTC ISO8601 (YYYY-MM-DD HH:MM).\n"
+                    "4. Group logically similar rapid events but keep important state transitions explicit.\n"
+                    "5. Output a concise narrative summary first (outside code fence).\n"
+                    "6. Then output EXACTLY ONE fenced mermaid code block using the 'timeline' syntax:```mermaid\\ntimeline\nTitle: Device Timeline (DEVICE_ID)\nStart: <earliest timestamp>\n<YYYY-MM-DD HH:MM>: <Category> - <Brief description>\n...\n```\n"
                     "Rules: \n- Do not include any other fenced mermaid blocks.\n- Categories: Compliance, Policy, App, Check-in, Error, Enrollment, Other.\n- Limit to <= 60 events focusing on impactful changes.\n- If no events found, still return an empty timeline code block with a 'No significant events' note.\n"
                 )
                 query_message = (
@@ -1363,8 +1830,8 @@ STRICT RESPONSE CONSTRAINTS:
         # Extract any obvious identifiers from the message
         guid_match = re.search(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", message)
         
-        # Check for scenario references
-        scenario_titles = self.scenario_service.list_all_scenario_titles()
+        # Check for scenario references (legacy path only if legacy service present)
+        scenario_titles = self.scenario_service.list_all_scenario_titles() if self.scenario_service else []
         if scenario_titles:
             message_lower = message.lower()
             for title in scenario_titles:

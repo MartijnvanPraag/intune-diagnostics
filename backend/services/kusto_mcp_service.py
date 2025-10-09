@@ -147,6 +147,20 @@ class KustoMCPService:
                 
                 logger.debug(f"MCP call params (keys): {list(mcp_params.keys())}")
                 result = await self._session.call_tool(tool_name, mcp_params)
+                # Additional raw logging for diagnostics (agent framework path)
+                try:
+                    raw_content = getattr(result, 'content', None)
+                    if raw_content is not None:
+                        previews = []
+                        for itm in raw_content:  # type: ignore
+                            txt = getattr(itm, 'text', None)
+                            if txt:
+                                previews.append(txt[:150])
+                            if len(previews) >= 2:
+                                break
+                        logger.debug("[KustoMCP][ServiceRaw] parts=%d preview=%s", len(raw_content), " || ".join(previews))
+                except Exception as raw_err:  # noqa: BLE001
+                    logger.debug(f"[KustoMCP][ServiceRaw] logging failed: {raw_err}")
                 return self._normalize_tool_result(result)
             except Exception as e:  # noqa: BLE001
                 last_error = str(e)

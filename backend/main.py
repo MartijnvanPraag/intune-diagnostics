@@ -53,6 +53,17 @@ async def lifespan(app: FastAPI):
     await init_db()
     # Initialize agent service
     await AgentService.initialize()
+    # Eager semantic scenario search warmup (non-blocking)
+    try:
+        from services.semantic_scenario_search import get_semantic_search
+        # Kick off initialization; underlying initialize() is idempotent
+        search = await get_semantic_search()
+        if getattr(search, '_initialized', False):
+            logging.getLogger(__name__).info("Semantic scenario search ready at startup (eager)")
+        else:
+            logging.getLogger(__name__).warning("Semantic scenario search not initialized; will lazy-init on first use")
+    except Exception as warm_err:  # noqa: BLE001
+        logging.getLogger(__name__).warning(f"Semantic search warmup failed (will lazy-init later): {warm_err}")
     yield
     # Cleanup
     await AgentService.cleanup()

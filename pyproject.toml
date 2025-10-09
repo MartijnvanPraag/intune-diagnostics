@@ -5,6 +5,21 @@ description = "Intune Diagnostics Web App Backend with Agentic AI"
 authors = [{ name = "Support Engineer", email = "support@example.com" }]
 readme = "docs/README.md"
 requires-python = ">=3.11"
+# Dependency version policy:
+# We intentionally use lower-bound (>=) constraints to allow `uv lock --upgrade` to pull in the
+# newest compatible versions. Pre-releases (betas) are currently allowed globally (see [tool.uv])
+# which means new beta versions of core libs (e.g. pydantic, agent-framework) may land during an
+# upgrade. If you want to avoid accidental beta adoption, either:
+#   1. Remove `prerelease = "allow"` in [tool.uv]; or
+#   2. Pin specific packages here (e.g. "fastapi==0.118.0") after verifying stability; or
+#   3. Use environment variable: UV_PRERELEASE=disallow for one-off stable-only upgrades.
+# Upgrade workflow (manual):
+#   pwsh> Copy-Item uv.lock uv.lock.bak
+#   pwsh> uv lock --upgrade              # recompute lock with newest allowed versions
+#   pwsh> uv sync                        # install updated set
+#   pwsh> pytest -q                      # (optional) run tests
+#   pwsh> uv pip check                   # (optional) verify dependency graph integrity
+# If a regression appears, compare uv.lock with uv.lock.bak and selectively pin the culprit.
 dependencies = [
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",

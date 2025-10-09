@@ -1,0 +1,74 @@
+[
+  {
+    "title": "Advanced Scenario: Device Timeline",
+    "parsed_queries": 10,
+    "semantic_queries": 10,
+    "normalized_key": "advanced_scenario_device_timeline"
+  },
+  {
+    "title": "Applications",
+    "parsed_queries": 3,
+    "semantic_queries": 3,
+    "normalized_key": "applications"
+  },
+  {
+    "title": "Autopilot Summary Investigation Workflow",
+    "parsed_queries": 9,
+    "semantic_queries": 9,
+    "normalized_key": "autopilot_summary_investigation_workflow"
+  },
+  {
+    "title": "Device Compliance (Last 10 Days)",
+    "parsed_queries": 1,
+    "semantic_queries": 1,
+    "normalized_key": "device_compliance_last_10_days"
+  },
+  {
+    "title": "Device Details",
+    "parsed_queries": 1,
+    "semantic_queries": 1,
+    "normalized_key": "device_details"
+  },
+  {
+    "title": "Effective Group Memberships and Troubleshooting",
+    "parsed_queries": 5,
+    "semantic_queries": 5,
+    "normalized_key": "effective_group_memberships_and_troubleshooting"
+  },
+  {
+    "title": "Identify conflicting DCv1 and DCv2 policies",
+    "parsed_queries": 1,
+    "semantic_queries": 1,
+    "normalized_key": "identify_conflicting_dcv1_and_dcv2_policies"
+  },
+  {
+    "title": "MAM Policy",
+    "parsed_queries": 1,
+    "semantic_queries": 1,
+    "normalized_key": "mam_policy"
+  },
+  {
+    "title": "Multi-Value Column Expansion Pattern (Readable Tables)",
+    "parsed_queries": 1,
+    "semantic_queries": 1,
+    "normalized_key": "multi_value_column_expansion_pattern_readable_tables"
+  },
+  {
+    "title": "Policy / Setting Status and Assignments",
+    "parsed_queries": 3,
+    "semantic_queries": 3,
+    "normalized_key": "policy_setting_status_and_assignments"
+  },
+  {
+    "title": "Tenant Information",
+    "parsed_queries": 1,
+    "semantic_queries": 1,
+    "normalized_key": "tenant_information"
+  },
+  {
+    "title": "User ID Lookup",
+    "parsed_queries": 1,
+    "semantic_queries": 1,
+    "normalized_key": "user_id_lookup"
+  }
+]

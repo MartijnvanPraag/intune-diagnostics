@@ -1,5 +1,8 @@
 import re
+import logging
 from typing import List, Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
 
 SCENARIO_HEADING_PATTERN = re.compile(r"^#+\s+(.*)")
 CODE_BLOCK_FENCE = re.compile(r"^```(kusto|sql|kql|bash|text)?\s*$", re.IGNORECASE)
@@ -102,24 +105,71 @@ def parse_instructions(markdown_text: str) -> List[Dict[str, Any]]:
                         u['description'] = desc.strip()
                     break
 
+    # Fallback pass: for scenarios with zero queries, search description for inline cluster().database().Function(...) lines
+    inline_func_pattern = re.compile(r"cluster\(.*?\)\.database\(.*?\)\.[A-Za-z0-9_]+\(.*\)")
+    rescued = 0
+    for u in unique:
+        if not u['queries']:
+            lines = u['description'].splitlines()
+            for ln in lines:
+                stripped = ln.strip()
+                # Ignore fenced indicators or comments
+                if not stripped or stripped.startswith('```') or stripped.startswith('//'):
+                    continue
+                if inline_func_pattern.search(stripped):
+                    u['queries'].append(stripped)
+            if u['queries']:
+                rescued += 1
+    if rescued:
+        logger.info(f"[instructions_parser] Fallback rescued queries for {rescued} scenario(s)")
+
+    # Debug summary
+    try:
+        summary = [(u['title'], len(u['queries'])) for u in unique]
+        logger.debug("[instructions_parser] Scenario query counts: %s", summary)
+    except Exception:  # noqa: BLE001
+        pass
+
     return [u for u in unique if u['queries']]
 
 def _is_probable_kusto(block: str) -> bool:
+    """Heuristic to decide if a fenced code block is Kusto.
+
+    Improvements:
+    - Recognize single-line cluster().database().Function(...) invocations even if they lack multiple pipe operators.
+    - Accept common Intune function style names (DeviceComplianceStatusChangesByDeviceId, GetEspFailuresForTenant, etc.).
+    - Lower threshold for keyword score when strong function pattern present.
+    - Allow one-keyword queries if they reference DeviceId / AccountId placeholders and cluster/database pattern.
+    """
     text = block.strip()
     if not text:
         return False
-    
-    # Strong indicators that this is a Kusto query
+
+    lowered = text.lower()
     strong_indicators = ["cluster(", "database("]
-    kusto_keywords = ["|", "project ", "where ", "take ", "summarize ", "extend ", "datatable ", "let ", "union ", "join "]
-    function_patterns = ["GetTenantInformation", "GetDeviceDetails", "StatusChanges", "Investigation"]
-    
-    # If it starts with cluster() call, it's almost certainly Kusto
-    if any(indicator in text for indicator in strong_indicators):
-        return True
-    
-    # Or if it has multiple Kusto keywords/patterns
-    score = sum(1 for i in kusto_keywords if i.lower() in text.lower())
-    score += sum(1 for p in function_patterns if p in text)
-    
+    if any(ind in lowered for ind in strong_indicators):
+        # If it has the canonical cluster().database() invocation AND an opening parenthesis for a function call after that
+        # treat it as Kusto even without pipe tokens.
+        if re.search(r"cluster\(.*?\)\.database\(.*?\)\.[A-Za-z0-9_]+\(", text):
+            return True
+
+    kusto_keywords = ["|", " project ", " where ", " take ", " summarize ", " extend ", " datatable ", " let ", " union ", " join "]
+    function_patterns = [
+        "GetTenantInformation", "GetDeviceDetails", "StatusChanges", "Investigation", "DeviceComplianceStatusChangesByDeviceId",
+        "ApplicationInstallAttemptsByDeviceId", "GetEspFailuresForTenant", "HighLevelCheckin", "GetAllPolicyAssignmentsForTenant"
+    ]
+
+    score = 0
+    if any(k.strip() and k.strip() in lowered for k in kusto_keywords):
+        # Count occurrences of pipe separately as it's very indicative
+        score += lowered.count('|') * 2
+        score += sum(1 for k in kusto_keywords if k.strip() in lowered)
+    score += sum(2 for p in function_patterns if p.lower() in lowered)
+
+    # Single-line strong function with cluster prefix
+    if score == 0 and any(ind in lowered for ind in strong_indicators):
+        # If it references typical placeholder markers, still treat as Kusto
+        if any(ph in lowered for ph in ['<deviceid>', '<accountid', '<contextid', 'ago(']):
+            return True
+
     return score >= 2
