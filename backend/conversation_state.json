@@ -1,14 +1,14 @@
 {
-  "device_id": null,
-  "account_id": null,
-  "context_id": null,
+  "device_id": "a50be5c2-d482-40ab-af57-18bace67b0ec",
+  "account_id": "f83277c1-cf37-4873-83bc-701577219fed",
+  "context_id": "91b1f197-1329-4a14-b617-cb9a027e756a",
   "tenant_id": null,
-  "user_id": null,
-  "scale_unit_name": null,
+  "user_id": "8f1db5da-effa-4c48-b3b8-24dd81c8ce5a",
+  "scale_unit_name": "AMSUD0101",
   "serial_number": null,
   "device_name": null,
   "azure_ad_device_id": null,
-  "primary_user": null,
-  "enrolled_by_user": null,
-  "last_updated": "2025-10-07T23:23:49.746195+00:00"
+  "primary_user": "8F1DB5DA-EFFA-4C48-B3B8-24DD81C8CE5A",
+  "enrolled_by_user": "8F1DB5DA-EFFA-4C48-B3B8-24DD81C8CE5A",
+  "last_updated": "2025-10-14T03:10:23.604436+00:00"
 }

@@ -28,53 +28,6 @@ else:
     response_content = str(raw_content) if raw_content else ""
 ```
 
-## Issue 2: Semantic Search File Path Error
-**Problem**: Semantic scenario search couldn't find `instructions.md`:
-```
-[ERROR] Error parsing instructions.md: [Errno 2] No such file or directory: 
-'C:\dev\intune-diagnostics\backend\instructions.md'
-```
-
-**Root Cause**: Path construction used only 2 `.parent` calls instead of 3:
-- File location: `backend/services/semantic_scenario_search.py`
-- `.parent.parent` reached `backend/` instead of workspace root
-- `instructions.md` is at workspace root
-
-**File Fixed**: `backend/services/semantic_scenario_search.py` (Line 214)
-
-**Solution**:
-```python
-# Before:
-instructions_path = Path(__file__).parent.parent / "instructions.md"
-# Results in: C:\dev\intune-diagnostics\backend\instructions.md ❌
-
-# After:
-instructions_path = Path(__file__).parent.parent.parent / "instructions.md"
-# Results in: C:\dev\intune-diagnostics\instructions.md ✅
-```
-
-## Issue 3: LangChain Deprecation Warning (FIXED)
-**Problem**: Warning about deprecated `HuggingFaceEmbeddings` import:
-```
-LangChainDeprecationWarning: The class `HuggingFaceEmbeddings` was deprecated in LangChain 0.2.2 
-and will be removed in 1.0. Use langchain-huggingface package instead.
-```
-
-**File Fixed**: `backend/services/semantic_scenario_search.py` (Lines 110-114)
-
-**Solution**:
-1. Added `langchain-huggingface>=0.1.0` to `pyproject.toml`
-2. Installed package: `uv pip install langchain-huggingface`
-3. Updated import with fallback:
-```python
-# New (preferred):
-try:
-    from langchain_huggingface import HuggingFaceEmbeddings
-except ImportError:
-    # Fallback to old import
-    from langchain_community.embeddings import HuggingFaceEmbeddings
-```
-
 ## Issue 4: Build Configuration Error (FIXED)
 **Problem**: `uv sync` failed with error:
 ```
@@ -102,12 +55,6 @@ readme = "docs/README.md"
    - Verify AI Insight Summary shows actual text, not `<ChatMessage object>`
    - Verify Kusto Query Results table displays data
 
-2. **Semantic Search**:
-   - Test query: "device_details for deviceid a50be5c2-d482-40ab-af57-18bace67b0ec"
-   - Check logs for: `[INFO] Loaded X scenarios from instructions.md` ✅
-   - Should NOT see: `[ERROR] No such file or directory` ❌
-   - Should NOT see: `[WARNING] Semantic search not available, using keyword fallback` ❌
-
 3. **Magentic Manager**:
    - Verify logs show `[Magentic] Running workflow...`
    - Verify orchestration messages appear
@@ -116,14 +63,13 @@ readme = "docs/README.md"
 ## Files Modified
 - `backend/services/agent_framework_service.py` (2 locations)
 - `backend/services/autogen_service.py` (2 locations)
-- `backend/services/semantic_scenario_search.py` (2 locations - path fix + import update)
 - `pyproject.toml` (added langchain-huggingface dependency + fixed README path)
 
 ## Expected Behavior
 All diagnostic queries should now:
 1. Display AI insights as readable text
 2. Show table data correctly
-3. Use semantic search for scenario matching
+3. Use keyword-based scenario matching
 4. Log Magentic orchestration activity
 5. No deprecation warnings in logs
 6. `uv sync` completes successfully

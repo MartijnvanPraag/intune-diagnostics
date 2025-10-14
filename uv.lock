@@ -28,7 +28,7 @@ wheels = [
 
 [[package]]
 name = "agent-framework"
-version = "1.0.0b251001"
+version = "1.0.0b251007"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-framework-a2a" },
@@ -39,9 +39,9 @@ dependencies = [
     { name = "agent-framework-mem0" },
     { name = "agent-framework-redis" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/80/37/fb42aab11a488e67ad1b58a4551644153889ad0a7ee3929f8ffbe10d6833/agent_framework-1.0.0b251001.tar.gz", hash = "sha256:d150f22c8b6fb7b9b809b871a87dad568ab8921f9f2eba151bbf59a801dd2664", size = 1612913, upload-time = "2025-10-01T14:02:13.144Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6b/a6/d21b9666b738b7398ab1b58c31fcd17f0b4da04e822f261b097058451ee5/agent_framework-1.0.0b251007.tar.gz", hash = "sha256:c17e1286471d22f60304a36a03e38f87bf7a720dee6fce5c35bc738eb5227abc", size = 1689664, upload-time = "2025-10-07T21:54:55.549Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f4/bd/6d876c84ed90d2421a33cc43ab0eae94b6e50d6b1b5f5290f96ba44d4824/agent_framework-1.0.0b251001-py3-none-any.whl", hash = "sha256:17b75e752b5638c1513a57e88bd960559ec9bc32d45743b970b10108cd8ff3ce", size = 5508, upload-time = "2025-10-01T14:02:11.31Z" },
+    { url = "https://files.pythonhosted.org/packages/e6/aa/7c4b12e59040d2cb7c4d19d34ceb0de2a126c9850d954d08cc02acb760d4/agent_framework-1.0.0b251007-py3-none-any.whl", hash = "sha256:c582b2f7d1659cc5c543c6a6e90cfd05c87547b0dadbce38cd46aa75f883474f", size = 5551, upload-time = "2025-10-07T21:54:53.43Z" },
 ]
 
 [[package]]
@@ -87,8 +87,8 @@ wheels = [
 
 [[package]]
 name = "agent-framework-core"
-version = "1.0.0b251001"
-source = { registry = "https://pypi.org/simple" }
+version = "1.0.0b251007"
+source = { git = "https://github.com/microsoft/agent-framework.git?subdirectory=python%2Fpackages%2Fcore&rev=main#9148392d00dafa47a95178622f3800f89bbf0425" }
 dependencies = [
     { name = "aiofiles" },
     { name = "azure-identity" },
@@ -103,10 +103,6 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/d9/df/b99069b963d046c494b442be3615111fc38d9e0c7a315702102c24e999d6/agent_framework_core-1.0.0b251001.tar.gz", hash = "sha256:2b31fbb40245657c74c8e8a321c1034b19e1506f2b040338d9df30e14ce14dc4", size = 357867, upload-time = "2025-10-01T14:01:54.658Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f0/ad/f31c9a53af71631eaddaefb766cfa5d87818359512d6e353ef1e45bbb607/agent_framework_core-1.0.0b251001-py3-none-any.whl", hash = "sha256:c11c3d387080b45e32f56926618adda324d2a5fd3e4dc86cd0aca3efd464d411", size = 239755, upload-time = "2025-10-01T14:01:53.329Z" },
 ]
 
 [[package]]
@@ -1472,6 +1468,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "agent-framework" },
+    { name = "agent-framework-core" },
     { name = "aiofiles" },
     { name = "aiosqlite" },
     { name = "alembic" },
@@ -1518,6 +1515,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "agent-framework", specifier = ">=0.1.0" },
+    { name = "agent-framework-core", git = "https://github.com/microsoft/agent-framework.git?subdirectory=python%2Fpackages%2Fcore&rev=main" },
     { name = "aiofiles", specifier = ">=23.2.1" },
     { name = "aiosqlite", specifier = ">=0.19.0" },
     { name = "alembic", specifier = ">=1.12.0" },

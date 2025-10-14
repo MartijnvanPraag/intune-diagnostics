@@ -38,21 +38,22 @@ from agent_framework.azure import AzureOpenAIChatClient
 from models.schemas import ModelConfiguration
 from services.auth_service import auth_service
 from services.scenario_lookup_service import get_scenario_service
-from services.semantic_scenario_search import get_semantic_search
 
 
 def create_scenario_lookup_function() -> Callable[..., Awaitable[str]]:
-    """Create a function for looking up scenarios from instructions.md using semantic search
-    
-    This function uses FAISS-based semantic search to find relevant scenarios,
-    which is much more robust than keyword matching.
+    """Create a function for looking up scenarios from instructions.md.
+
+    This function relies on the ScenarioLookupService keyword scoring to find
+    relevant scenarios without depending on the experimental semantic search
+    subsystem.
     """
     
     async def lookup_scenarios(user_request: str, max_scenarios: int = 3) -> str:
-        """Look up relevant diagnostic scenarios from instructions.md using semantic search.
+        """Look up relevant diagnostic scenarios from instructions.md.
         
-        This tool uses AI embeddings to understand the semantic meaning of your request
-        and find matching diagnostic scenarios. Much better than keyword matching!
+        This tool uses the ScenarioLookupService keyword scoring engine to
+        understand user intent and return the most relevant diagnostic
+        scenarios.
         
         Use this tool to find the appropriate Kusto queries for a user's diagnostic request.
         This is the PRIMARY tool for finding diagnostic queries - ALWAYS use this first.
@@ -65,23 +66,15 @@ def create_scenario_lookup_function() -> Callable[..., Awaitable[str]]:
             Matching diagnostic scenarios with their queries from instructions.md
         """
         try:
-            # Get scenario service and semantic search
+            # Get scenario service and use keyword-based lookup
             scenario_service = get_scenario_service()
-            semantic_search = await get_semantic_search()
-            
+
             # Log the user request for debugging
             logger.info(f"[AgentFramework] Scenario lookup called with: '{user_request}'")
+
+            matching_titles = scenario_service.find_scenarios_by_keywords(user_request, max_scenarios)
             
-            # Try semantic search first (if initialized)
-            if semantic_search and semantic_search._initialized:
-                logger.info(f"[AgentFramework] Using semantic search for scenario lookup")
-                matching_titles = semantic_search.search(user_request, max_scenarios)
-            else:
-                # Fallback to keyword-based search
-                logger.warning(f"[AgentFramework] Semantic search not available, using keyword fallback")
-                matching_titles = scenario_service.find_scenarios_by_keywords(user_request, max_scenarios)
-            
-            logger.info(f"[AgentFramework] Found matching scenarios: {matching_titles}")
+            logger.info(f"[AgentFramework] Found matching scenarios via keyword lookup: {matching_titles}")
             
             if not matching_titles:
                 available = scenario_service.list_all_scenario_titles()
@@ -970,13 +963,25 @@ class AgentFrameworkService:
                 start_time = parameters.get("start_time") or parameters.get("start")
                 end_time = parameters.get("end_time") or parameters.get("end")
                 timeline_instructions = (
-                    "You are an Intune diagnostics expert. Build a chronological device event timeline covering compliance status changes, policy assignment or evaluation outcomes, application install attempts (success/failure), device check-ins (including failures or long gaps), enrollment/sync events, and notable error events for the specified device and time window.\n"
-                    "1. Discover and aggregate relevant events via available tools / queries.\n"
-                    "2. Normalize timestamps to UTC ISO8601 (YYYY-MM-DD HH:MM).\n"
-                    "3. Group logically similar rapid events but keep important state transitions explicit.\n"
-                    "4. Output a concise narrative summary first (outside code fence).\n"
-                    "5. Then output EXACTLY ONE fenced mermaid code block using the 'timeline' syntax:```mermaid\\ntimeline\nTitle: Device Timeline (DEVICE_ID)\nStart: <earliest timestamp>\n<YYYY-MM-DD HH:MM>: <Category> - <Brief description>\n...\n```\n"
-                    "Rules: \n- Do not include any other fenced mermaid blocks.\n- Categories: Compliance, Policy, App, Check-in, Error, Enrollment, Other.\n- Limit to <= 60 events focusing on impactful changes.\n- If no events found, still return an empty timeline code block with a 'No significant events' note.\n"
+                    "You are an Intune diagnostics expert. Build a comprehensive chronological device event timeline.\n\n"
+                    "CRITICAL REQUIREMENTS:\n"
+                    "1. Look up the 'Advanced Scenario: Device Timeline' from instructions.md using lookup_scenarios\n"
+                    "2. YOU MUST execute ALL queries in the Device Timeline scenario - there are approximately 9 queries total\n"
+                    "3. Execute queries in order: Device_Snapshot → Compliance → Applications → Check-ins → Group Membership → Group Definitions → Deployments → Events\n"
+                    "4. Do NOT stop after the first few queries - continue until ALL queries have been executed\n"
+                    "5. Some queries depend on results from earlier queries (e.g., group IDs, tenant ID) - extract these values and use them\n"
+                    "6. If a query needs placeholders like <EffectiveGroupIdList> or <TenantId>, extract them from previous query results\n\n"
+                    "7. If any query produces an error, REPORT the error and continue on with the remaining queries\n\n"
+                    "OUTPUT FORMAT:\n"
+                    "1. Narrative summary of findings\n"
+                    "2. List ALL Kusto queries executed (should be ~9 queries)\n"
+                    "3. ONE mermaid timeline code block:\n"
+                    "```mermaid\\ntimeline\nTitle: Device Timeline (DEVICE_ID)\nStart: <earliest timestamp>\n<YYYY-MM-DD HH:MM>: <Category> - <Brief description>\n...\n```\n\n"
+                    "Timeline Rules:\n"
+                    "- Categories: Compliance, Policy, App, Check-in, Error, Enrollment, Group, Deployment, Other\n"
+                    "- Limit to <= 60 most impactful events\n"
+                    "- Normalize all timestamps to UTC ISO8601 (YYYY-MM-DD HH:MM)\n"
+                    "- If no events, output empty timeline with 'No significant events' note\n"
                 )
                 query_message = (
                     f"{timeline_instructions}\nParameters: device_id={device_id}, start_time={start_time}, end_time={end_time}. Return narrative then the mermaid block."
@@ -993,7 +998,39 @@ class AgentFrameworkService:
                 # Log orchestrator and agent events for debugging
                 if hasattr(event, '__class__'):
                     event_type = event.__class__.__name__
-                    logger.debug(f"[Magentic] Received event: {event_type}")
+                    logger.info(f"[Magentic] Received event: {event_type}")
+                    
+                    # Log message content for debugging the conversation
+                    if hasattr(event, 'message'):
+                        msg = getattr(event, 'message', None)
+                        if msg:
+                            # Log sender if available
+                            sender = getattr(msg, 'sender', 'unknown')
+                            role = getattr(msg, 'role', 'unknown')
+                            
+                            # Extract text content
+                            msg_text = ""
+                            if hasattr(msg, 'text') and getattr(msg, 'text'):
+                                msg_text = getattr(msg, 'text')
+                            elif hasattr(msg, 'contents') and getattr(msg, 'contents'):
+                                contents = getattr(msg, 'contents')
+                                text_parts = []
+                                for c in contents:
+                                    if hasattr(c, 'text') and getattr(c, 'text'):
+                                        text_parts.append(str(getattr(c, 'text')))
+                                    elif hasattr(c, '__class__'):
+                                        # Log non-text content types (like function calls/results)
+                                        content_type = c.__class__.__name__
+                                        if 'function' in content_type.lower() or 'tool' in content_type.lower():
+                                            logger.info(f"[Magentic] {event_type} contains {content_type}")
+                                msg_text = " ".join(text_parts) if text_parts else ""
+                            
+                            # Log the message with truncation for long messages
+                            if msg_text:
+                                truncated = msg_text[:500] + "..." if len(msg_text) > 500 else msg_text
+                                logger.info(f"[Magentic] {event_type} from {sender} ({role}): {truncated}")
+                            else:
+                                logger.info(f"[Magentic] {event_type} from {sender} ({role}): <no text content>")
                 
                 # Capture the final output
                 if isinstance(event, WorkflowOutputEvent):
@@ -1238,7 +1275,39 @@ STRICT RESPONSE CONSTRAINTS:
                 # Log orchestrator and agent events for debugging
                 if hasattr(event, '__class__'):
                     event_type = event.__class__.__name__
-                    logger.debug(f"[Magentic] Received event: {event_type}")
+                    logger.info(f"[Magentic] Received event: {event_type}")
+                    
+                    # Log message content for debugging the conversation
+                    if hasattr(event, 'message'):
+                        msg = getattr(event, 'message', None)
+                        if msg:
+                            # Log sender if available
+                            sender = getattr(msg, 'sender', 'unknown')
+                            role = getattr(msg, 'role', 'unknown')
+                            
+                            # Extract text content
+                            msg_text = ""
+                            if hasattr(msg, 'text') and getattr(msg, 'text'):
+                                msg_text = getattr(msg, 'text')
+                            elif hasattr(msg, 'contents') and getattr(msg, 'contents'):
+                                contents = getattr(msg, 'contents')
+                                text_parts = []
+                                for c in contents:
+                                    if hasattr(c, 'text') and getattr(c, 'text'):
+                                        text_parts.append(str(getattr(c, 'text')))
+                                    elif hasattr(c, '__class__'):
+                                        # Log non-text content types (like function calls/results)
+                                        content_type = c.__class__.__name__
+                                        if 'function' in content_type.lower() or 'tool' in content_type.lower():
+                                            logger.info(f"[Magentic] {event_type} contains {content_type}")
+                                msg_text = " ".join(text_parts) if text_parts else ""
+                            
+                            # Log the message with truncation for long messages
+                            if msg_text:
+                                truncated = msg_text[:500] + "..." if len(msg_text) > 500 else msg_text
+                                logger.info(f"[Magentic] {event_type} from {sender} ({role}): {truncated}")
+                            else:
+                                logger.info(f"[Magentic] {event_type} from {sender} ({role}): <no text content>")
                 
                 # Capture the final output
                 if isinstance(event, WorkflowOutputEvent):

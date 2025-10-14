@@ -37,11 +37,17 @@ class ConversationContext:
         
         # Handle different query result formats
         if isinstance(query_result, dict):
-            # If it has tables (typical MCP response format)
+            # If it has tables (plural) - typical MCP response format with multiple tables
             if "tables" in query_result and isinstance(query_result["tables"], list):
                 for table in query_result["tables"]:
                     if "rows" in table and isinstance(table["rows"], list):
                         self._extract_from_rows(table["rows"], table.get("columns", []))
+            
+            # If it has table (singular) - our normalized kusto service format
+            elif "table" in query_result and isinstance(query_result["table"], dict):
+                table = query_result["table"]
+                if "rows" in table and isinstance(table["rows"], list):
+                    self._extract_from_rows(table["rows"], table.get("columns", []))
             
             # Direct extraction from top-level keys
             self._extract_from_dict(query_result)
@@ -162,11 +168,43 @@ class ConversationStateService:
     def update_from_query_result(self, query_result: Dict[str, Any]) -> None:
         """Update context from a query result"""
         try:
+            # Log what we're receiving
+            logger.debug(f"Received query_result keys: {list(query_result.keys()) if isinstance(query_result, dict) else 'not a dict'}")
+            
+            # Check if we have tables
+            if isinstance(query_result, dict) and "tables" in query_result:
+                tables = query_result.get("tables", [])
+                logger.debug(f"Found {len(tables) if isinstance(tables, list) else 0} tables in query result")
+                if isinstance(tables, list) and tables:
+                    first_table = tables[0]
+                    if isinstance(first_table, dict):
+                        logger.debug(f"First table keys: {list(first_table.keys())}")
+                        if "rows" in first_table:
+                            rows = first_table.get("rows", [])
+                            logger.debug(f"First table has {len(rows) if isinstance(rows, list) else 0} rows")
+            
+            # Store context before update
+            old_context = self.context.get_available_context()
+            
+            # Update context
             self.context.update_from_query_result(query_result)
+            
+            # Store context after update
+            new_context = self.context.get_available_context()
+            
+            # Check what changed
+            added_keys = set(new_context.keys()) - set(old_context.keys())
+            updated_keys = {k for k in new_context.keys() if k in old_context and new_context[k] != old_context[k]}
+            
             self._save_to_file()
-            logger.info(f"Updated conversation context: {list(self.context.get_available_context().keys())}")
+            
+            if added_keys or updated_keys:
+                logger.info(f"Updated conversation context: added={list(added_keys)}, updated={list(updated_keys)}, total={list(new_context.keys())}")
+            else:
+                logger.info(f"Conversation context unchanged (no identifiers found in query result)")
+                
         except Exception as e:
-            logger.warning(f"Failed to update conversation context: {e}")
+            logger.warning(f"Failed to update conversation context: {e}", exc_info=True)
     
     def get_context_value(self, key: str) -> Optional[str]:
         """Get a specific context value"""
