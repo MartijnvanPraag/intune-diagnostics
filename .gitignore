@@ -70,3 +70,7 @@ logs/
 *.log
 .mypy_cache/3.11/__future__.data.json
 instructions.md
+
+# Test and debug scripts
+test*
+debug*

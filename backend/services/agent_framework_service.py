@@ -16,7 +16,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Union
 
 # Logging is configured in main.py
 logger = logging.getLogger(__name__)
@@ -34,7 +34,21 @@ from agent_framework import (
     MagenticBuilder,
     WorkflowOutputEvent,
 )
+from agent_framework._workflows._magentic import (
+    MagenticAgentDeltaEvent,
+    MagenticAgentMessageEvent,
+    MagenticFinalResultEvent,
+    MagenticOrchestratorMessageEvent,
+)
 from agent_framework.azure import AzureOpenAIChatClient
+
+# Define the Union type for Magentic callback events
+MagenticCallbackEvent = Union[
+    MagenticOrchestratorMessageEvent,
+    MagenticAgentDeltaEvent,
+    MagenticAgentMessageEvent,
+    MagenticFinalResultEvent,
+]
 from models.schemas import ModelConfiguration
 from services.auth_service import auth_service
 from services.scenario_lookup_service import get_scenario_service
@@ -278,6 +292,67 @@ def create_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[
     mcp_tool_func.__doc__ = tool_description
     
     return mcp_tool_func
+
+
+def create_instructions_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[..., Awaitable[str]]:
+    """Create an async function wrapper for an Instructions MCP tool
+    
+    Similar to create_mcp_tool_function but for the Instructions MCP server.
+    These tools provide structured access to diagnostic scenarios and queries.
+    """
+    
+    async def instructions_mcp_tool_func(**kwargs: Any) -> str:
+        f"""Execute Instructions MCP tool: {tool_name}
+        
+        {tool_description}
+        
+        Args:
+            **kwargs: Tool-specific parameters
+            
+        Returns:
+            Result from the Instructions MCP tool execution
+        """
+        try:
+            from services.instructions_mcp_service import get_instructions_service
+            
+            instructions_service = await get_instructions_service()
+            
+            # Handle nested kwargs structure from agent calls
+            if "kwargs" in kwargs and isinstance(kwargs["kwargs"], dict):
+                actual_args = kwargs["kwargs"]
+            else:
+                actual_args = kwargs
+            
+            logger.info(f"[AgentFramework] Calling Instructions MCP tool '{tool_name}' with args: {actual_args}")
+            
+            if hasattr(instructions_service, '_session') and instructions_service._session:
+                result = await instructions_service._session.call_tool(tool_name, actual_args)
+                
+                # Convert result to JSON string
+                if hasattr(result, 'content'):
+                    # MCP result with content field
+                    content_items = result.content
+                    if content_items and len(content_items) > 0:
+                        first_item = content_items[0]
+                        if hasattr(first_item, 'text'):
+                            return str(first_item.text)  # type: ignore
+                        else:
+                            return json.dumps({"content": str(first_item)})
+                    return json.dumps({"content": "No content returned"})
+                else:
+                    return json.dumps({"result": str(result)})
+            else:
+                return json.dumps({"success": False, "error": "Instructions MCP session not available"})
+                
+        except Exception as e:
+            logger.error(f"Instructions MCP tool {tool_name} execution failed: {e}")
+            return json.dumps({"success": False, "error": str(e)})
+    
+    # Set function metadata for proper tool registration
+    instructions_mcp_tool_func.__name__ = tool_name
+    instructions_mcp_tool_func.__doc__ = tool_description
+    
+    return instructions_mcp_tool_func
 
 
 class AgentFrameworkService:
@@ -525,47 +600,61 @@ class AgentFrameworkService:
         )
     
     async def _discover_mcp_tools(self) -> list[Callable[..., Awaitable[str]]]:
-        """Discover and create tools from the MCP server
+        """Discover and create tools from the MCP servers
         
         Returns a list of async functions that can be used as tools
         in the Agent Framework's function calling system.
         """
         try:
             from services.kusto_mcp_service import get_kusto_service
+            from services.instructions_mcp_service import get_instructions_service
             
+            # Create function wrappers for each MCP tool
+            tools: list[Callable[..., Awaitable[str]]] = []
+            
+            # Legacy tools removed - using Instructions MCP instead
+            # - lookup_scenarios → search_scenarios (Instructions MCP)
+            # - lookup_context → get_query (Instructions MCP)
+            
+            # Initialize and discover Instructions MCP tools
+            try:
+                instructions_service = await get_instructions_service()
+                if hasattr(instructions_service, '_session') and instructions_service._session:
+                    inst_tool_list = await instructions_service._session.list_tools()
+                    inst_mcp_tools = getattr(inst_tool_list, "tools", [])
+                    
+                    for mcp_tool in inst_mcp_tools:
+                        tool_name = mcp_tool.name
+                        tool_description = getattr(mcp_tool, 'description', f'Instructions MCP tool: {tool_name}')
+                        
+                        # Create a function wrapper for this MCP tool
+                        tool_function = create_instructions_mcp_tool_function(tool_name, tool_description)
+                        tools.append(tool_function)
+                        logger.info(f"Created tool wrapper for Instructions MCP tool: {tool_name}")
+                else:
+                    logger.warning("Instructions MCP session not available")
+            except Exception as inst_err:
+                logger.error(f"Failed to discover Instructions MCP tools: {inst_err}")
+            
+            # Initialize and discover Kusto MCP tools
             kusto_service = await get_kusto_service()
-            
-            # Get the available tools from the MCP server
             if hasattr(kusto_service, '_session') and kusto_service._session:
                 tool_list = await kusto_service._session.list_tools()
                 mcp_tools = getattr(tool_list, "tools", [])
                 
-                # Create function wrappers for each MCP tool
-                tools: list[Callable[..., Awaitable[str]]] = []
-                
-                # Add the scenario lookup tool first
-                lookup_function = create_scenario_lookup_function()
-                tools.append(lookup_function)
-                logger.info("Added scenario lookup tool")
-                
-                # Add the context lookup tool
-                context_function = create_context_lookup_function()
-                tools.append(context_function)
-                logger.info("Added context lookup tool")
-                
                 for mcp_tool in mcp_tools:
                     tool_name = mcp_tool.name
-                    tool_description = getattr(mcp_tool, 'description', f'MCP tool: {tool_name}')
+                    tool_description = getattr(mcp_tool, 'description', f'Kusto MCP tool: {tool_name}')
                     
                     # Create a function wrapper for this MCP tool
                     tool_function = create_mcp_tool_function(tool_name, tool_description)
                     tools.append(tool_function)
-                    logger.info(f"Created tool wrapper for MCP tool: {tool_name}")
+                    logger.info(f"Created tool wrapper for Kusto MCP tool: {tool_name}")
                 
                 return tools
             else:
-                logger.warning("MCP session not available for tool discovery")
-                return []
+                logger.warning("Kusto MCP session not available for tool discovery")
+                return tools  # Return what we have (Instructions MCP tools)
                 
         except Exception as e:
             logger.error(f"Failed to discover MCP tools: {e}")
@@ -584,77 +673,74 @@ class AgentFrameworkService:
         
         # System instructions (same as Autogen version)
         system_instructions = f"""
-        You are an Intune Expert agent specializing in Microsoft Intune diagnostics and troubleshooting.
+        You are an Intune Expert assistant specializing in Microsoft Intune diagnostics and troubleshooting.
         
-        Your role is to interpret natural language requests from support engineers and execute the appropriate
-        Kusto queries using the MCP server tools to retrieve and analyze Intune device diagnostics information.
-        
-    INFRASTRUCTURE LABELS (IGNORE):
-    - Any internal agent/orchestrator names are infrastructure metadata.
-    - They are NOT user facts, NOT products, and NOT part of the Intune diagnostic domain.
-    - Do NOT list them under GIVEN FACTS or treat them as entities that require lookup or explanation.
+        Your role is to help support engineers by executing Kusto queries through MCP server tools
+        to retrieve and analyze Intune device diagnostics information.
         
         AVAILABLE DIAGNOSTIC SCENARIOS:
         {self.scenario_service.get_scenario_summary()}
         
-        NATURAL LANGUAGE UNDERSTANDING:
-        - Interpret user requests naturally without requiring specific keywords or parameters
-        - Extract relevant identifiers (Device IDs, Account IDs, Context IDs) from user messages
-        - Use the lookup_scenarios tool to find relevant diagnostic scenarios based on user intent
-        - Execute only the queries provided by the lookup_scenarios tool - do not create your own queries
+        WORKFLOW - HOW TO EXECUTE SCENARIOS (FOLLOW THIS ORDER STRICTLY):
         
-        MANDATORY WORKFLOW (MUST FOLLOW IN ORDER):
-        1. ALWAYS call lookup_scenarios first with the user's request text
-        2. If the scenario requires context from previous queries, call lookup_context to get stored values
-        3. Execute ONLY the queries returned by lookup_scenarios using MCP tools
-        4. Return results in table format as specified in instructions.md
+        **PHASE 1: SCENARIO DISCOVERY (DO ONCE)**
+        1. Call search_scenarios ONCE with user's keywords
+           Returns: {{"results": [{{"slug": "scenario-name"}}]}}
+           Extract: results[0].slug
         
-        DO NOT:
-        - Create your own queries or speculation
-        - Skip the lookup_scenarios step
-        - Provide "fact sheets" or analysis without executing queries
-        - Make educated guesses about data not retrieved
+        2. Call get_scenario ONCE with the slug
+           Returns: {{"steps": [{{"step_number": 1, "query_id": "...", "placeholders": {{...}}, "dependencies": [...]}}]}}
+           Extract: Full steps array
         
-        SCENARIO LOOKUP WORKFLOW:
-        1. When a user makes a request, IMMEDIATELY call lookup_scenarios with their request text
-        2. The tool will return relevant diagnostic scenarios with their queries  
-        3. Use the MCP server tools to execute the queries from the retrieved scenarios
-        4. Always use the exact cluster URLs and database names from the scenario queries
+        **PHASE 2: QUERY EXECUTION (DO FOR ALL STEPS)**
+        3. For EACH step in order (respecting dependencies):
+           a) Call substitute_and_get_query(query_id=step.query_id, placeholder_values={{key: value}})
+              Returns: {{"query_text": "SELECT ..."}}
+           b) Call execute_query(query=query_text)
+              Returns: Query results as JSON
+           c) Extract values needed for next steps' placeholders
         
-        CONVERSATION CONTEXT HANDLING:
-        - The system automatically stores key identifiers (DeviceId, AccountId, ContextId, etc.) from query results
-        - Placeholders are automatically substituted with stored context values
-        - For follow-up questions, use lookup_context if you need to check what context is available
-        - If needed context is missing, ask the user to provide the required identifiers
+        **PHASE 3: COMPLETION (REQUIRED)**
+        4. After ALL steps execute successfully:
+           - Format results as markdown tables
+           - Provide summary of findings
+           - Return final response to user
+           - **STOP CALLING TOOLS** - workflow is complete
         
-        KUSTO QUERY EXECUTION:
-        - Use ONLY the queries provided by lookup_scenarios
-        - The system will automatically substitute stored context values
-        - The MCP server provides various tools for executing Kusto queries
-        - Always use the appropriate cluster URLs and database names from the scenario queries
+        CRITICAL RULES:
+        - search_scenarios: Call EXACTLY ONCE (not multiple times with variations)
+        - get_scenario: Call EXACTLY ONCE with the slug from search
+        - After returning formatted results to user: STOP (do NOT call search_scenarios again)
+        - Do NOT loop back to Phase 1 after Phase 3
+        - Parallel execution allowed: If steps have same dependencies, run substitute_and_get_query + execute_query in parallel
         
-        RESPONSE FORMAT (MANDATORY):
-        1. Always return a TABLE first (raw results as markdown)
-        2. Include all key identifier columns (DeviceId, AccountId, ContextId, etc.)
-        3. Provide concise summaries after tables highlighting key findings
-        4. Follow all formatting requirements from instructions.md
-        5. If multiple datasets needed, show multiple labeled tables
-
-    STRICT BEHAVIOR RULES (GLOBAL):
-    - ALWAYS use lookup_scenarios first - do not skip this step
-    - DO NOT create "fact sheets", "educated guesses", or lengthy analysis - execute queries instead
-    - DO NOT speculate about group memberships, policies, or statuses not in query results
-    - EXECUTE QUERIES, DON'T ANALYZE - your job is to run Kusto queries
-    - Keep answers tightly scoped to the user request
-    - If context is ambiguous, ask a concise clarifying question
+        JSON PARSING:
+        - search_scenarios → results[0].slug
+        - get_scenario → steps array with query_id, placeholders, dependencies
+        - substitute_and_get_query → query_text field
+        - execute_query → table results
         
-        EXAMPLE INTERACTIONS:
-        - "Show me device details for abc-123" -> Find device details query and execute it
-        - "What's the compliance status?" -> Use compliance query from instructions.md
-        - "Device enrollment issues" -> Execute relevant diagnostic queries
-        - "Execute scenario X" -> Run all queries defined for scenario X
+        COMPLETION DETECTION:
+        When you have executed all scenario steps and formatted the results:
+        1. Return the formatted tables and summary to the user
+        2. DO NOT make any more tool calls
+        3. DO NOT call search_scenarios or get_scenario again
+        4. The orchestrator will detect completion when you return text without tool calls
         
-        Always rely on instructions.md for the correct Kusto queries and use your MCP tools to execute them.
+        If the orchestrator asks you to continue after you've returned results, respond with:
+        "Scenario execution completed. All queries have been executed and results returned."
+        
+        AVAILABLE TOOLS:
+        - search_scenarios(keywords or query): Find scenarios
+        - get_scenario(slug): Get scenario definition with all steps
+        - substitute_and_get_query(query_id, placeholder_values): Get executable query
+        - execute_query(query): Run Kusto query
+        
+        BEST PRACTICES:
+        - Execute all queries in scenario before returning results
+        - Use exact query text from substitute_and_get_query (do not modify)
+        - Extract identifiers from results to populate next step placeholders
+        - After final results returned: STOP (no more tool calls)
         """
         
         # Discover and create tools from MCP server
@@ -881,6 +967,67 @@ class AgentFrameworkService:
                 unique.append(t)
         return unique
 
+    async def _magentic_event_callback(self, event: MagenticCallbackEvent) -> None:
+        """Handle Magentic Team callback events and log them to console.
+        
+        This callback receives all orchestrator and agent messages during workflow execution,
+        providing visibility into the multi-agent conversation.
+        
+        Args:
+            event: One of MagenticOrchestratorMessageEvent, MagenticAgentDeltaEvent,
+                   MagenticAgentMessageEvent, or MagenticFinalResultEvent
+        """
+        try:
+            if isinstance(event, MagenticOrchestratorMessageEvent):
+                # Orchestrator messages (planning, task ledger, instructions, notices)
+                orchestrator_id = getattr(event, 'orchestrator_id', 'orchestrator')
+                message = getattr(event, 'message', None)
+                kind = getattr(event, 'kind', 'unknown')
+                
+                if message:
+                    message_text = getattr(message, 'text', '')
+                    truncated = message_text[:300] + "..." if len(message_text) > 300 else message_text
+                    logger.info(f"[Magentic-Orchestrator] [{kind}] {truncated}")
+            
+            elif isinstance(event, MagenticAgentDeltaEvent):
+                # Agent streaming deltas (real-time response chunks)
+                agent_id = getattr(event, 'agent_id', 'agent')
+                text = getattr(event, 'text', '')
+                role = getattr(event, 'role', None)
+                
+                # Log function calls if present
+                fn_call_name = getattr(event, 'function_call_name', None)
+                fn_result_id = getattr(event, 'function_result_id', None)
+                
+                if fn_call_name:
+                    logger.info(f"[Magentic-Agent-{agent_id}] Function call: {fn_call_name}")
+                elif fn_result_id:
+                    logger.info(f"[Magentic-Agent-{agent_id}] Function result received")
+                elif text:
+                    logger.info(f"[Magentic-Agent-{agent_id}] ({role}): {text[:100]}")
+            
+            elif isinstance(event, MagenticAgentMessageEvent):
+                # Complete agent message (final aggregated response)
+                agent_id = getattr(event, 'agent_id', 'agent')
+                message = getattr(event, 'message', None)
+                
+                if message:
+                    message_text = getattr(message, 'text', '')
+                    role = getattr(message, 'role', 'unknown')
+                    truncated = message_text[:300] + "..." if len(message_text) > 300 else message_text
+                    logger.info(f"[Magentic-Agent-{agent_id}] ({role}) Final: {truncated}")
+            
+            elif isinstance(event, MagenticFinalResultEvent):
+                # Final workflow result
+                message = getattr(event, 'message', None)
+                if message:
+                    message_text = getattr(message, 'text', '')
+                    truncated = message_text[:300] + "..." if len(message_text) > 300 else message_text
+                    logger.info(f"[Magentic-FinalResult] {truncated}")
+        
+        except Exception as callback_err:
+            logger.warning(f"Magentic event callback error: {callback_err}")
+
     async def setup_agent(self, model_config: ModelConfiguration) -> bool:
         """Set up the Agent Framework with Magentic orchestration"""
         try:
@@ -895,24 +1042,39 @@ class AgentFrameworkService:
             # Build the Magentic workflow with orchestration
             # This is equivalent to Autogen's MagenticOneGroupChat
             logger.info("Building Magentic workflow with IntuneExpert agent...")
+            
+            # Import MagenticCallbackMode for streaming configuration
+            from agent_framework._workflows._magentic import MagenticCallbackMode
+            
             self.magentic_workflow = (
                 MagenticBuilder()
                 .participants(IntuneExpert=self.intune_expert_agent)
                 .with_standard_manager(
                     chat_client=self.chat_client,
-                    max_round_count=20,  # Equivalent to max_turns in Autogen
-                    max_stall_count=3,   # Equivalent to max_stalls in Autogen
+                    max_round_count=50,  # Increased to allow all 9 Device Timeline queries
+                    max_stall_count=5,   # Increased to avoid premature reset
+                )
+                .on_event(
+                    self._magentic_event_callback,
+                    mode=MagenticCallbackMode.NON_STREAMING  # Use STREAMING for delta events
                 )
                 .build()
             )
             
-            # Initialize Kusto MCP service
+            # Initialize MCP services
             try:
+                from services.instructions_mcp_service import get_instructions_service
                 from services.kusto_mcp_service import get_kusto_service
+                
+                # Initialize Instructions MCP first (provides scenario queries)
+                instructions_service = await get_instructions_service()
+                logger.info(f"Instructions MCP service initialized (tools={getattr(instructions_service, '_tool_names', [])})")
+                
+                # Initialize Kusto MCP (executes queries)
                 kusto_service = await get_kusto_service()
                 logger.info(f"Kusto MCP service initialized (tools={getattr(kusto_service, '_tool_names', [])})")
             except Exception as mcp_err:
-                logger.error(f"Failed to initialize Kusto MCP service: {mcp_err}")
+                logger.error(f"Failed to initialize MCP services: {mcp_err}")
                 raise
             
             logger.info("Agent Framework with Magentic orchestration setup completed successfully")
@@ -957,37 +1119,33 @@ class AgentFrameworkService:
                     "errors": scenario_run.get("errors", []),
                 }
             
-            # Handle device timeline with specialized prompt
-            if query_type == "device_timeline":
-                device_id = parameters.get("device_id") or parameters.get("deviceid") or parameters.get("device")
-                start_time = parameters.get("start_time") or parameters.get("start")
-                end_time = parameters.get("end_time") or parameters.get("end")
-                timeline_instructions = (
-                    "You are an Intune diagnostics expert. Build a comprehensive chronological device event timeline.\n\n"
-                    "CRITICAL REQUIREMENTS:\n"
-                    "1. Look up the 'Advanced Scenario: Device Timeline' from instructions.md using lookup_scenarios\n"
-                    "2. YOU MUST execute ALL queries in the Device Timeline scenario - there are approximately 9 queries total\n"
-                    "3. Execute queries in order: Device_Snapshot → Compliance → Applications → Check-ins → Group Membership → Group Definitions → Deployments → Events\n"
-                    "4. Do NOT stop after the first few queries - continue until ALL queries have been executed\n"
-                    "5. Some queries depend on results from earlier queries (e.g., group IDs, tenant ID) - extract these values and use them\n"
-                    "6. If a query needs placeholders like <EffectiveGroupIdList> or <TenantId>, extract them from previous query results\n\n"
-                    "7. If any query produces an error, REPORT the error and continue on with the remaining queries\n\n"
-                    "OUTPUT FORMAT:\n"
-                    "1. Narrative summary of findings\n"
-                    "2. List ALL Kusto queries executed (should be ~9 queries)\n"
-                    "3. ONE mermaid timeline code block:\n"
-                    "```mermaid\\ntimeline\nTitle: Device Timeline (DEVICE_ID)\nStart: <earliest timestamp>\n<YYYY-MM-DD HH:MM>: <Category> - <Brief description>\n...\n```\n\n"
-                    "Timeline Rules:\n"
-                    "- Categories: Compliance, Policy, App, Check-in, Error, Enrollment, Group, Deployment, Other\n"
-                    "- Limit to <= 60 most impactful events\n"
-                    "- Normalize all timestamps to UTC ISO8601 (YYYY-MM-DD HH:MM)\n"
-                    "- If no events, output empty timeline with 'No significant events' note\n"
-                )
-                query_message = (
-                    f"{timeline_instructions}\nParameters: device_id={device_id}, start_time={start_time}, end_time={end_time}. Return narrative then the mermaid block."
-                )
-            else:
-                query_message = f"Please execute a {query_type} query with the following parameters: {parameters}"
+            # Build scenario execution message with clear completion criteria
+            query_message = (
+                f"Execute the '{query_type}' diagnostic scenario with parameters: {parameters}\n\n"
+                f"WORKFLOW (follow this EXACTLY - do NOT deviate):\n"
+                f"1. Call search_scenarios ONCE with '{query_type}' keywords\n"
+                f"2. Extract results[0].slug from the JSON response\n"
+                f"3. Call get_scenario ONCE with that slug\n"
+                f"4. Get the steps array from the JSON response\n"
+                f"5. For EACH step in the steps array:\n"
+                f"   a) Call substitute_and_get_query(query_id, placeholder_values)\n"
+                f"   b) Extract query_text from the JSON response\n"
+                f"   c) Call execute_query(query=query_text)\n"
+                f"   d) Extract values from results for next step placeholders\n"
+                f"6. After ALL steps executed:\n"
+                f"   a) Format results as markdown tables\n"
+                f"   b) Provide summary of findings\n"
+                f"   c) Return final response\n"
+                f"   d) STOP - DO NOT call search_scenarios or get_scenario again\n\n"
+                f"PARALLEL EXECUTION: If multiple steps have the same dependencies (e.g., all need DeviceId "
+                f"from step 1), execute those substitute_and_get_query + execute_query calls in parallel.\n\n"
+                f"COMPLETION CRITERIA:\n"
+                f"You are DONE when:\n"
+                f"- All scenario steps have been executed (or attempted)\n"
+                f"- Results have been formatted and returned to user\n"
+                f"- You have provided a final text response (not just tool calls)\n"
+                f"After returning your final formatted response, make NO MORE TOOL CALLS.\n\n"
+            )
             
             # Run the Magentic workflow with streaming
             logger.info(f"[Magentic] Running workflow with query: {query_message[:100]}...")
@@ -1246,7 +1404,21 @@ STRICT RESPONSE CONSTRAINTS:
 - Only report data that comes from successful query results
 - If a query fails, report the error and ask for guidance
 - Use lookup_context to get stored values for placeholders in queries
-""" if strict_mode else ""
+
+TASK COMPLETION CRITERIA:
+The task is COMPLETE when ALL of the following are satisfied:
+1. All required queries have been executed successfully
+2. Query results have been formatted and presented to the user
+3. A summary or analysis has been provided based on the results
+The task is NOT complete if queries are executed but no response is given to the user.
+""" if strict_mode else """
+TASK COMPLETION CRITERIA:
+The task is COMPLETE when:
+1. All necessary information has been gathered
+2. Results have been formatted and presented to the user
+3. A clear response addressing the user's request has been provided
+The task is NOT complete until a user-facing response is given.
+"""
                 composite_task = (
                     ("The following is the prior conversation (most recent last). Use it to maintain context such as referenced device IDs or other identifiers.\n" + "\n".join(history_lines) + "\n\n")
                     + (guardrail)
@@ -1260,10 +1432,24 @@ STRICT RESPONSE CONSTRAINTS:
                         "- EXECUTE the queries returned by lookup_scenarios - do not skip execution\n"
                         "- Use lookup_context to get stored values if queries have placeholders\n"
                         "- Only return factual data from query results, no speculation\n\n"
-                        f"User message: {message}"
+                        f"User message: {message}\n\n"
+                        "TASK COMPLETION CRITERIA:\n"
+                        "The task is COMPLETE when ALL of the following are satisfied:\n"
+                        "1. All required queries have been executed successfully\n"
+                        "2. Query results have been formatted and presented to the user\n"
+                        "3. A summary or analysis has been provided based on the results\n"
+                        "The task is NOT complete if queries are executed but no response is given to the user."
                     )
                 else:
-                    composite_task = message
+                    composite_task = (
+                        f"{message}\n\n"
+                        "TASK COMPLETION CRITERIA:\n"
+                        "The task is COMPLETE when:\n"
+                        "1. All necessary information has been gathered (queries executed if needed)\n"
+                        "2. Results have been formatted and presented to the user\n"
+                        "3. A clear response addressing the user's request has been provided\n"
+                        "The task is NOT complete until a user-facing response is given."
+                    )
 
             # Run the Magentic workflow with streaming
             logger.info(f"[Magentic] Running workflow with message: {composite_task[:100]}...")
