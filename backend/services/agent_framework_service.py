@@ -17,6 +17,42 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+# Agent Framework imports (equivalent to Autogen)
+# The agent-framework package provides the core chat agent functionality
+# Documentation: https://github.com/microsoft/agent-framework/tree/main/python
+from agent_framework import (
+    ChatAgent,
+    MagenticBuilder,
+    WorkflowOutputEvent,
+)
+from agent_framework._workflows._magentic import (
+    MagenticAgentDeltaEvent,
+    MagenticAgentMessageEvent,
+    MagenticFinalResultEvent,
+    MagenticOrchestratorMessageEvent,
+)
+from agent_framework.azure import AzureOpenAIChatClient
+from models.schemas import ModelConfiguration
+from services.auth_service import auth_service
+from services.scenario_lookup_service import get_scenario_service
+
+# Logging is configured in main.py
+logger = logging.getLogger(__name__)
+
+# Buffer to hold recent MCP tool normalized results (tables) because Agent Framework
+# streaming events are not currently exposing function result payloads needed for
+# table reconstruction. This allows a fallback after workflow completion.
+TOOL_RESULTS_BUFFER: list[dict[str, Any]] = []
+
+# Define the Union type for Magentic callback events
+MagenticCallbackEvent = (
+    MagenticOrchestratorMessageEvent
+    | MagenticAgentDeltaEvent
+    | MagenticAgentMessageEvent
+    | MagenticFinalResultEvent
+)
+
+
 
 def _normalize_datetime_value(raw: Any) -> Any:
     """Convert common ISO 8601 datetime strings to Kusto friendly format."""
@@ -58,41 +94,6 @@ def _normalize_placeholder_value(key_name: str, raw: Any) -> Any:
     if isinstance(raw, str) and key_name.lower().endswith('time'):
         return _normalize_datetime_value(raw)
     return raw
-
-# Agent Framework imports (equivalent to Autogen)
-# The agent-framework package provides the core chat agent functionality
-# Documentation: https://github.com/microsoft/agent-framework/tree/main/python
-from agent_framework import (
-    ChatAgent,
-    MagenticBuilder,
-    WorkflowOutputEvent,
-)
-from agent_framework._workflows._magentic import (
-    MagenticAgentDeltaEvent,
-    MagenticAgentMessageEvent,
-    MagenticFinalResultEvent,
-    MagenticOrchestratorMessageEvent,
-)
-from agent_framework.azure import AzureOpenAIChatClient
-from models.schemas import ModelConfiguration
-from services.auth_service import auth_service
-from services.scenario_lookup_service import get_scenario_service
-
-# Logging is configured in main.py
-logger = logging.getLogger(__name__)
-
-# Buffer to hold recent MCP tool normalized results (tables) because Agent Framework
-# streaming events are not currently exposing function result payloads needed for
-# table reconstruction. This allows a fallback after workflow completion.
-TOOL_RESULTS_BUFFER: list[dict[str, Any]] = []
-
-# Define the Union type for Magentic callback events
-MagenticCallbackEvent = (
-    MagenticOrchestratorMessageEvent
-    | MagenticAgentDeltaEvent
-    | MagenticAgentMessageEvent
-    | MagenticFinalResultEvent
-)
 
 
 def create_context_lookup_function() -> Callable[..., Awaitable[str]]:
@@ -146,7 +147,6 @@ def create_context_lookup_function() -> Callable[..., Awaitable[str]]:
     lookup_context.__name__ = "lookup_context"
     
     return lookup_context
-
 
 def create_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[..., Awaitable[str]]:
     """Create an async function wrapper for an MCP tool
