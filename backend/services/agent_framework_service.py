@@ -191,20 +191,52 @@ def create_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[
                 # Substitute placeholders in query with stored context
                 query = context_service.substitute_placeholders(query)
                 
-                # TEST: Use hardcoded defaults for cluster and database
-                # Query contains embedded cluster() calls, but we pass defaults to MCP server
-                default_cluster_url = "https://intune.kusto.windows.net"
-                default_database = "Intune"
-                
-                logger.info(f"[AgentFramework] Using DEFAULT cluster URL: {default_cluster_url}")
-                logger.info(f"[AgentFramework] Using DEFAULT database: {default_database}")
                 logger.info(f"[AgentFramework] Query length: {len(query)} characters")
                 logger.info(f"[AgentFramework] Query (first 500 chars): {query[:500]}...")
                 
-                # Pass default cluster/database to MCP server, leave query unchanged
+                # Extract cluster URL and database from the query
+                import re
+                
+                cluster_url = None
+                database = None
+                
+                # Pattern 1: Direct cluster calls - cluster("url").database("db") or cluster('url').database('db')
+                # Handles both single and double quotes, with or without https:// prefix
+                direct_cluster_match = re.search(r"cluster\(['\"](?:https?://)?([^'\"]+)['\"]\)", query)
+                if direct_cluster_match:
+                    cluster_url = direct_cluster_match.group(1)
+                
+                # Pattern 2: base_query function calls - base_query('url', 'label')
+                # This pattern is used when queries define a function parameter
+                if not cluster_url or cluster_url == "cluster":
+                    base_query_match = re.search(r"base_query\(['\"]([^'\"]+)['\"]", query)
+                    if base_query_match:
+                        cluster_url = base_query_match.group(1)
+                
+                # Extract database name
+                database_match = re.search(r"\.database\(['\"]([^'\"]+)['\"]\)", query)
+                if database_match:
+                    database = database_match.group(1)
+                
+                # Use fallback defaults if not found
+                if not cluster_url or cluster_url == "cluster":
+                    cluster_url = "intune.kusto.windows.net"
+                    logger.warning(f"[AgentFramework] Could not extract cluster URL, using default: {cluster_url}")
+                
+                if not database:
+                    database = "intune"
+                    logger.warning(f"[AgentFramework] Could not extract database, using default: {database}")
+                
+                # Ensure cluster URL is properly formatted (add https:// if missing)
+                if not cluster_url.startswith("https://"):
+                    cluster_url = f"https://{cluster_url}"
+                
+                logger.info(f"[AgentFramework] Extracted cluster URL: {cluster_url}")
+                logger.info(f"[AgentFramework] Extracted database: {database}")
+                
                 mcp_args = {
-                    "clusterUrl": default_cluster_url,
-                    "database": default_database,
+                    "clusterUrl": cluster_url,
+                    "database": database,
                     "query": query,
                     **{k: v for k, v in actual_args.items() if k not in ["clusterUrl", "database", "query"]}
                 }
