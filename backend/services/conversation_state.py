@@ -29,7 +29,14 @@ class ConversationContext:
     azure_ad_device_id: Optional[str] = None
     primary_user: Optional[str] = None
     enrolled_by_user: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
     last_updated: Optional[str] = None
+    
+    # List-based identifiers for multi-step queries
+    effective_group_id_list: Optional[str] = None  # Comma-separated quoted list
+    group_id_list: Optional[str] = None  # Comma-separated quoted list
+    policy_id_list: Optional[str] = None  # Comma-separated quoted list
     
     def update_from_query_result(self, query_result: Dict[str, Any]) -> None:
         """Extract and update context from a query result"""
@@ -65,7 +72,9 @@ class ConversationContext:
             'DeviceName': 'device_name',
             'AzureAdDeviceId': 'azure_ad_device_id',
             'PrimaryUser': 'primary_user',
-            'EnrolledByUser': 'enrolled_by_user'
+            'EnrolledByUser': 'enrolled_by_user',
+            'StartTime': 'start_time',
+            'EndTime': 'end_time'
         }
         
         for key, attr in key_mappings.items():
@@ -84,7 +93,7 @@ class ConversationContext:
         if rows:
             first_row = rows[0]
             
-            # Map common column names to context fields
+            # Map common column names to context fields (single values)
             mappings = {
                 'DeviceId': 'device_id',
                 'AccountId': 'account_id',
@@ -96,7 +105,9 @@ class ConversationContext:
                 'DeviceName': 'device_name',
                 'AzureAdDeviceId': 'azure_ad_device_id',
                 'PrimaryUser': 'primary_user',
-                'EnrolledByUser': 'enrolled_by_user'
+                'EnrolledByUser': 'enrolled_by_user',
+                'StartTime': 'start_time',
+                'EndTime': 'end_time'
             }
             
             for col_name, field_name in mappings.items():
@@ -104,6 +115,32 @@ class ConversationContext:
                     idx = col_index[col_name]
                     if idx < len(first_row) and first_row[idx]:
                         setattr(self, field_name, str(first_row[idx]))
+        
+        # Extract list-based identifiers (collect all unique values from all rows)
+        list_column_mappings = {
+            'EffectiveGroupId': 'effective_group_id_list',
+            'GroupId': 'group_id_list',
+            'PolicyId': 'policy_id_list',
+            'PayloadId': 'policy_id_list',  # PayloadId is also used for policies
+        }
+        
+        for col_name, field_name in list_column_mappings.items():
+            if col_name in col_index:
+                idx = col_index[col_name]
+                # Collect all non-null unique values from this column
+                values = set()
+                for row in rows:
+                    if idx < len(row) and row[idx]:
+                        value = str(row[idx]).strip()
+                        if value and value.lower() not in ('null', 'none', ''):
+                            values.add(value)
+                
+                # Format as comma-separated quoted list for Kusto queries
+                if values:
+                    # Sort for consistency and create quoted, comma-separated string
+                    formatted_list = ', '.join(f"'{v}'" for v in sorted(values))
+                    setattr(self, field_name, formatted_list)
+                    logger.info(f"Extracted {len(values)} values for {field_name}: {formatted_list[:100]}{'...' if len(formatted_list) > 100 else ''}")
 
     def get_available_context(self) -> Dict[str, str]:
         """Get all non-null context values"""
@@ -134,7 +171,13 @@ class ConversationContext:
             'devicename': 'device_name',
             'azureaddeviceid': 'azure_ad_device_id',
             'primaryuser': 'primary_user',
-            'enrolledbyuser': 'enrolled_by_user'
+            'enrolledbyuser': 'enrolled_by_user',
+            'starttime': 'start_time',
+            'endtime': 'end_time',
+            # List-based identifiers
+            'effectivegroupidlist': 'effective_group_id_list',
+            'groupidlist': 'group_id_list',
+            'policyidlist': 'policy_id_list',
         }
         
         if normalized_key in aliases:
@@ -165,6 +208,53 @@ class ConversationStateService:
         self.context = ConversationContext()
         self._save_to_file()
     
+    def start_new_run(self, seed_parameters: Dict[str, Any] | None = None) -> None:
+        """Reset context for a new diagnostics run and seed with user parameters."""
+        self.context = ConversationContext()
+
+        seeded = False
+        if seed_parameters:
+            # Map incoming parameter keys to conversation context attributes
+            parameter_mapping = {
+                'device_id': 'device_id',
+                'account_id': 'account_id',
+                'context_id': 'context_id',
+                'tenant_id': 'tenant_id',
+                'user_id': 'user_id',
+                'scale_unit_name': 'scale_unit_name',
+                'serial_number': 'serial_number',
+                'device_name': 'device_name',
+                'azure_ad_device_id': 'azure_ad_device_id',
+                'primary_user': 'primary_user',
+                'enrolled_by_user': 'enrolled_by_user',
+                'start_time': 'start_time',
+                'end_time': 'end_time',
+                'effective_group_id_list': 'effective_group_id_list',
+                'group_id_list': 'group_id_list',
+                'policy_id_list': 'policy_id_list',
+            }
+
+            for param_key, attr_name in parameter_mapping.items():
+                if param_key in seed_parameters and seed_parameters[param_key] is not None:
+                    value = seed_parameters[param_key]
+                    if isinstance(value, list):
+                        value = ', '.join(str(item) for item in value if item is not None)
+                    else:
+                        value = str(value)
+                    setattr(self.context, attr_name, value)
+                    seeded = True
+
+        if seed_parameters:
+            provided_keys = [k for k, v in (seed_parameters or {}).items() if v is not None]
+            logger.info(f"Initializing conversation state for new diagnostics run (seed keys: {provided_keys})")
+        else:
+            logger.info("Initializing conversation state for new diagnostics run (no seed parameters)")
+
+        if seeded:
+            self.context.last_updated = datetime.now(timezone.utc).isoformat()
+
+        self._save_to_file()
+
     def update_from_query_result(self, query_result: Dict[str, Any]) -> None:
         """Update context from a query result"""
         try:

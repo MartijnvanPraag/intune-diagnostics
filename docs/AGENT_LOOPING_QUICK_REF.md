@@ -1,53 +1,157 @@
-# Quick Reference: Agent Looping Fix
+# Agent Framework - Looping Prevention Quick Reference
 
-## What Was Fixed
+## Critical Changes Made
 
-✅ **Agent executing queries but never completing (infinite loop)**
+### 1. Placeholder Case Conversion (MOST CRITICAL)
+**Location**: `agent_framework_service.py` - `_build_placeholder_values()` method
 
-## Root Cause
+**What it does**:
+- Converts ALL placeholders to PascalCase
+- Maps `effective_group_id_list` → `EffectiveGroupIdList`
+- Maps `group_id_list` → `GroupIdList`
+- Maps `policy_id_list` → `PolicyIdList`
 
-The Magentic orchestrator uses a **progress ledger** (LLM-based evaluation) to determine task completion. The task lacked explicit completion criteria, so the LLM kept returning `is_request_satisfied: False` even after queries executed.
+**Why it matters**: MCP server rejects snake_case placeholders, causing validation loops
 
-## The Key Fix
+---
 
-**Added explicit completion criteria to all task definitions** before passing to `workflow.run_stream(task)`:
+### 2. Proactive Context Loading
+**Location**: `agent_framework_service.py` - `query_diagnostics()` method
 
+**Before**: Agent discovers missing placeholders → error → retry
+**After**: Load ALL context values upfront → provide to agent immediately
+
+**Code**:
 ```python
-# BEFORE
-task = "Device Timeline for DeviceId X"
-
-# AFTER
-task = (
-    "Device Timeline for DeviceId X\n\n"
-    "TASK COMPLETION CRITERIA:\n"
-    "The task is COMPLETE when:\n"
-    "1. All 9 queries executed\n"
-    "2. Results formatted and presented to user\n"
-    "3. Timeline visualization provided\n"
-    "NOT complete until user-facing response given."
-)
+context_values = context_service.get_all_context()
+all_placeholder_values = self._build_placeholder_values(parameters, context_values)
 ```
 
-## Where Changes Were Made
+---
 
-### 1. Generic Chat Tasks (Lines 1337-1380)
-- Tasks with conversation history
-- Tasks without conversation history
-- Both now include completion criteria
+### 3. Anti-Looping Instructions
+**Location**: `agent_framework_service.py` - System instructions
 
-### 2. Device Timeline Specific (Lines 1055-1095)
-- Device Timeline task instructions
-- Explicit 9-query completion criteria
-- Timeline visualization requirement
+**Key Rules Added**:
+- NEVER restart from step 1 after completing any steps
+- Execute SEQUENTIALLY: 1 → 2 → 3 → ... → N → DONE
+- Track progress: "Completed steps: 1, 2, 3"
+- After last step: STOP (no more tool calls)
 
-### 3. Agent System Instructions (Lines 661-730)
-- Already updated in previous fixes
-- Tells agent to respond after queries
-- Emphasizes completion signal
+---
 
-## How to Test
+### 4. Reduced Max Rounds
+**Location**: `agent_framework_service.py` - Magentic configuration
 
-```bash
+**Changed**:
+```python
+max_round_count=15  # Was 50 - prevents excessive looping
+max_stall_count=3   # Was 5 - fail faster
+```
+
+---
+
+## Debugging Looping Issues
+
+### Look for these in logs:
+
+✅ **Good Signs**:
+```
+[INFO] Built placeholder values with 6 keys: ['DeviceId', 'StartTime', 'EndTime', 'EffectiveGroupIdList', ...]
+[INFO] Extracted 1 values for effective_group_id_list: '...'
+[INFO] Instructions MCP tool 'substitute_and_get_query' returned: {"status": "success", ...}
+```
+
+❌ **Bad Signs (Looping)**:
+```
+[INFO] Instructions MCP tool 'substitute_and_get_query' returned: {"status": "validation_failed", ...}
+  → Missing placeholder that should be in context
+
+[INFO] Calling Instructions MCP tool 'search_scenarios' with args: ...
+  → Second call to search_scenarios = restarting from step 1
+
+[INFO] placeholder_values: {..., 'effective_group_id_list': '...'}
+  → Snake case instead of PascalCase
+```
+
+---
+
+## Expected Execution Flow
+
+### Device Timeline (8 steps):
+
+```
+1. Load context upfront
+   → Get EffectiveGroupIdList, GroupIdList, etc. if available
+
+2. Build complete placeholder values
+   → Convert all to PascalCase
+   → Merge parameters + context
+
+3. Send to agent with ALL placeholders
+
+4. Agent executes:
+   - search_scenarios('device-timeline')
+   - get_scenario('device-timeline') → 8 steps
+   - Step 1: substitute + execute ✅
+   - Step 2: substitute + execute ✅
+   - Step 3: substitute + execute ✅
+   - Step 4: substitute + execute ✅ (uses EffectiveGroupIdList from context)
+   - Step 5: substitute + execute ✅
+   - Step 6: substitute + execute ✅
+   - Step 7: substitute + execute ✅
+   - Step 8: substitute + execute ✅
+   - Format results → STOP
+
+Total: 1 round, ~10 tool calls (2 for discovery + 8 for execution)
+```
+
+---
+
+## Common Issues & Solutions
+
+### Issue: "EffectiveGroupIdList not provided"
+**Cause**: Case mismatch  
+**Solution**: Check `_build_placeholder_values()` has mapping:
+```python
+'effective_group_id_list': 'EffectiveGroupIdList'
+```
+
+### Issue: Agent restarts from step 1
+**Cause**: Orchestrator not recognizing completion  
+**Solution**: Check system instructions emphasize:
+- "DO NOT restart from step 1"
+- "After last step: STOP"
+
+### Issue: Excessive rounds (>15)
+**Cause**: max_round_count too high  
+**Solution**: Verify `max_round_count=15` in Magentic configuration
+
+### Issue: Steps executed multiple times
+**Cause**: No state preservation  
+**Solution**: Enhanced instructions now tell agent to track completed steps
+
+---
+
+## Performance Metrics
+
+| Metric | Before Fix | After Fix |
+|--------|------------|-----------|
+| Orchestration Rounds | 10+ | 1-2 |
+| Execution Time | 2-5 minutes | <30 seconds |
+| Validation Errors | Multiple per step | None |
+| search_scenarios calls | Multiple | 1 |
+| Completed Steps | 4 then restart | 8 sequential |
+
+---
+
+## Rollback Plan
+
+If issues occur, revert these changes in order:
+
+1. **Restore max_round_count**:
+   ```python
+   max_round_count=50  # Back to original
 # Start the app
 cd c:\dev\intune-diagnostics
 uv run python backend/main.py

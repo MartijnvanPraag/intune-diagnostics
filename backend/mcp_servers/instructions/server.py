@@ -395,21 +395,26 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
 
 def validate_placeholder_values(step, placeholder_values: dict) -> ValidationResult:
-    """Validate placeholder values"""
+    """Validate placeholder values with case-insensitive matching"""
     errors = []
     
+    # Create case-insensitive lookup map
+    value_map_lower = {k.lower(): v for k, v in placeholder_values.items()}
+    
     for name, placeholder in step.placeholders.items():
-        if placeholder.required and name not in placeholder_values:
+        name_lower = name.lower()
+        
+        if placeholder.required and name_lower not in value_map_lower:
             errors.append(ValidationError(
                 placeholder=name,
                 issue="Required placeholder not provided"
             ))
             continue
         
-        if name not in placeholder_values:
+        if name_lower not in value_map_lower:
             continue
         
-        value = placeholder_values[name]
+        value = value_map_lower[name_lower]
         
         # Type-specific validation
         if placeholder.type == PlaceholderType.GUID:
@@ -432,19 +437,24 @@ def validate_placeholder_values(step, placeholder_values: dict) -> ValidationRes
 
 
 def substitute_placeholders(step, placeholder_values: dict) -> SubstitutionResult:
-    """Substitute placeholders in query"""
+    """Substitute placeholders in query with case-insensitive matching"""
     query = step.query_text
     warnings = []
     placeholders_used = {}
+    
+    # Create case-insensitive lookup map
+    value_map_lower = {k.lower(): v for k, v in placeholder_values.items()}
     
     # Find all placeholders in query
     pattern = re.compile(r'<([A-Za-z][A-Za-z0-9_]*)>')
     
     for match in pattern.finditer(step.query_text):
         placeholder_name = match.group(1)
+        placeholder_lower = placeholder_name.lower()
         
-        if placeholder_name in placeholder_values:
-            value = placeholder_values[placeholder_name]
+        # Try case-insensitive lookup
+        if placeholder_lower in value_map_lower:
+            value = value_map_lower[placeholder_lower]
             placeholders_used[placeholder_name] = value
             
             # Substitute

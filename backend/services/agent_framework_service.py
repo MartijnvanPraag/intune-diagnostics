@@ -15,16 +15,49 @@ import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from pathlib import Path
-from typing import Any, AsyncGenerator, Union
+from typing import Any
 
-# Logging is configured in main.py
-logger = logging.getLogger(__name__)
 
-# Buffer to hold recent MCP tool normalized results (tables) because Agent Framework
-# streaming events are not currently exposing function result payloads needed for
-# table reconstruction. This allows a fallback after workflow completion.
-TOOL_RESULTS_BUFFER: list[dict[str, Any]] = []
+def _normalize_datetime_value(raw: Any) -> Any:
+    """Convert common ISO 8601 datetime strings to Kusto friendly format."""
+    from datetime import datetime as dt_parser
+
+    if not isinstance(raw, str):
+        return raw
+    if 'T' not in raw and ':' in raw:
+        return raw
+    iso_candidates = [
+        '%Y-%m-%dT%H:%M:%S.%fZ',
+        '%Y-%m-%dT%H:%M:%SZ',
+        '%Y-%m-%dT%H:%M:%S',
+        '%Y-%m-%dT%H:%M:%S.%f+00:00',
+        '%Y-%m-%dT%H:%M:%S+00:00'
+    ]
+    for fmt in iso_candidates:
+        try:
+            return dt_parser.strptime(raw, fmt).strftime('%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            continue
+    if raw.endswith('Z'):
+        try:
+            trimmed = raw.rstrip('Z')
+            return dt_parser.strptime(trimmed, '%Y-%m-%dT%H:%M:%S').strftime('%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            return raw
+    return raw
+
+
+def _normalize_placeholder_value(key_name: str, raw: Any) -> Any:
+    """Apply post-processing to match Instructions MCP expectations."""
+    if raw is None:
+        return raw
+    if isinstance(raw, list):
+        return ','.join(str(item) for item in raw)
+    if isinstance(raw, (int, float)):
+        return str(raw)
+    if isinstance(raw, str) and key_name.lower().endswith('time'):
+        return _normalize_datetime_value(raw)
+    return raw
 
 # Agent Framework imports (equivalent to Autogen)
 # The agent-framework package provides the core chat agent functionality
@@ -41,89 +74,25 @@ from agent_framework._workflows._magentic import (
     MagenticOrchestratorMessageEvent,
 )
 from agent_framework.azure import AzureOpenAIChatClient
-
-# Define the Union type for Magentic callback events
-MagenticCallbackEvent = Union[
-    MagenticOrchestratorMessageEvent,
-    MagenticAgentDeltaEvent,
-    MagenticAgentMessageEvent,
-    MagenticFinalResultEvent,
-]
 from models.schemas import ModelConfiguration
 from services.auth_service import auth_service
 from services.scenario_lookup_service import get_scenario_service
 
+# Logging is configured in main.py
+logger = logging.getLogger(__name__)
 
-def create_scenario_lookup_function() -> Callable[..., Awaitable[str]]:
-    """Create a function for looking up scenarios from instructions.md.
+# Buffer to hold recent MCP tool normalized results (tables) because Agent Framework
+# streaming events are not currently exposing function result payloads needed for
+# table reconstruction. This allows a fallback after workflow completion.
+TOOL_RESULTS_BUFFER: list[dict[str, Any]] = []
 
-    This function relies on the ScenarioLookupService keyword scoring to find
-    relevant scenarios without depending on the experimental semantic search
-    subsystem.
-    """
-    
-    async def lookup_scenarios(user_request: str, max_scenarios: int = 3) -> str:
-        """Look up relevant diagnostic scenarios from instructions.md.
-        
-        This tool uses the ScenarioLookupService keyword scoring engine to
-        understand user intent and return the most relevant diagnostic
-        scenarios.
-        
-        Use this tool to find the appropriate Kusto queries for a user's diagnostic request.
-        This is the PRIMARY tool for finding diagnostic queries - ALWAYS use this first.
-        
-        Args:
-            user_request: The user's diagnostic request or keywords to search for
-            max_scenarios: Maximum number of scenarios to return (default: 3)
-            
-        Returns:
-            Matching diagnostic scenarios with their queries from instructions.md
-        """
-        try:
-            # Get scenario service and use keyword-based lookup
-            scenario_service = get_scenario_service()
-
-            # Log the user request for debugging
-            logger.info(f"[AgentFramework] Scenario lookup called with: '{user_request}'")
-
-            matching_titles = scenario_service.find_scenarios_by_keywords(user_request, max_scenarios)
-            
-            logger.info(f"[AgentFramework] Found matching scenarios via keyword lookup: {matching_titles}")
-            
-            if not matching_titles:
-                available = scenario_service.list_all_scenario_titles()
-                logger.warning(f"[AgentFramework] No matching scenarios found. Available: {available}")
-                return "No matching diagnostic scenarios found. Available scenarios: " + \
-                       ", ".join(available)
-            
-            # Get detailed scenarios
-            scenarios = scenario_service.get_scenarios_by_titles(matching_titles)
-            
-            # Format response
-            response_parts = ["Found matching diagnostic scenarios:\n"]
-            
-            for i, scenario in enumerate(scenarios, 1):
-                response_parts.append(f"## {i}. {scenario.title}")
-                response_parts.append(f"**Description:** {scenario.description}")
-                response_parts.append("**Queries:**")
-                
-                for j, query in enumerate(scenario.queries, 1):
-                    response_parts.append(f"```kusto\n{query}\n```")
-                
-                response_parts.append("")  # Add spacing
-            
-            result = "\n".join(response_parts)
-            logger.info(f"[AgentFramework] Returning {len(scenarios)} scenarios with {sum(len(s.queries) for s in scenarios)} queries")
-            return result
-            
-        except Exception as e:
-            logger.error(f"[AgentFramework] Error in scenario lookup: {e}")
-            return f"Error looking up scenarios: {str(e)}"
-    
-    # Set function metadata for proper tool registration
-    lookup_scenarios.__name__ = "lookup_scenarios"
-    
-    return lookup_scenarios
+# Define the Union type for Magentic callback events
+MagenticCallbackEvent = (
+    MagenticOrchestratorMessageEvent
+    | MagenticAgentDeltaEvent
+    | MagenticAgentMessageEvent
+    | MagenticFinalResultEvent
+)
 
 
 def create_context_lookup_function() -> Callable[..., Awaitable[str]]:
@@ -187,9 +156,7 @@ def create_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[
     """
     
     async def mcp_tool_func(**kwargs: Any) -> str:
-        f"""Execute MCP tool: {tool_name}
-        
-        {tool_description}
+        """Execute MCP tool.
         
         Args:
             **kwargs: Tool-specific parameters
@@ -198,8 +165,8 @@ def create_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[
             Result from the MCP tool execution
         """
         try:
-            from services.kusto_mcp_service import get_kusto_service
             from services.conversation_state import get_conversation_state_service
+            from services.kusto_mcp_service import get_kusto_service
             
             kusto_service = await get_kusto_service()
             context_service = get_conversation_state_service()
@@ -216,53 +183,51 @@ def create_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[
             
             # For execute_query tool, ensure proper clusterUrl format and call MCP server directly
             if tool_name == "execute_query" and hasattr(kusto_service, '_session') and kusto_service._session:
-                cluster_url = actual_args.get("clusterUrl")
-                database = actual_args.get("database") 
                 query = actual_args.get("query")
                 
-                if cluster_url and database and query:
-                    # Substitute placeholders in query with stored context
-                    query = context_service.substitute_placeholders(query)
-                    
-                    # Ensure clusterUrl has https:// prefix as required by MCP server
-                    if not cluster_url.startswith(("https://", "http://")):
-                        normalized_cluster_url = f"https://{cluster_url}"
-                    else:
-                        normalized_cluster_url = cluster_url
-                    
-                    logger.info(f"[AgentFramework] Using cluster URL: {normalized_cluster_url}")
-                    logger.info(f"[AgentFramework] Query length: {len(query)} characters")
-                    logger.info(f"[AgentFramework] Query (first 500 chars): {query[:500]}...")
-                    
-                    # Pass parameters directly to MCP server
-                    mcp_args = {
-                        "clusterUrl": normalized_cluster_url,
-                        "database": database,
-                        "query": query,
-                        **{k: v for k, v in actual_args.items() if k not in ["clusterUrl", "database", "query"]}
-                    }
-                    
+                if not query:
+                    return json.dumps({"success": False, "error": "Missing required parameter: query"})
+                
+                # Substitute placeholders in query with stored context
+                query = context_service.substitute_placeholders(query)
+                
+                # TEST: Use hardcoded defaults for cluster and database
+                # Query contains embedded cluster() calls, but we pass defaults to MCP server
+                default_cluster_url = "https://intune.kusto.windows.net"
+                default_database = "Intune"
+                
+                logger.info(f"[AgentFramework] Using DEFAULT cluster URL: {default_cluster_url}")
+                logger.info(f"[AgentFramework] Using DEFAULT database: {default_database}")
+                logger.info(f"[AgentFramework] Query length: {len(query)} characters")
+                logger.info(f"[AgentFramework] Query (first 500 chars): {query[:500]}...")
+                
+                # Pass default cluster/database to MCP server, leave query unchanged
+                mcp_args = {
+                    "clusterUrl": default_cluster_url,
+                    "database": default_database,
+                    "query": query,
+                    **{k: v for k, v in actual_args.items() if k not in ["clusterUrl", "database", "query"]}
+                }
+                
+                try:
+                    result = await kusto_service._session.call_tool(tool_name, mcp_args)
+                    normalized = kusto_service._normalize_tool_result(result)
+                except Exception as e:
+                    logger.error(f"[AgentFramework] MCP call_tool failed: {type(e).__name__}: {e}")
+                    logger.error(f"[AgentFramework] Tool: {tool_name}")
+                    logger.error(f"[AgentFramework] Query contained {len(query)} chars")
+                    raise
+                
+                # Store query results in conversation context
+                if normalized and isinstance(normalized, dict) and normalized.get("success"):
+                    context_service.update_from_query_result(normalized)
                     try:
-                        result = await kusto_service._session.call_tool(tool_name, mcp_args)
-                        normalized = kusto_service._normalize_tool_result(result)
-                    except Exception as e:
-                        logger.error(f"[AgentFramework] MCP call_tool failed: {type(e).__name__}: {e}")
-                        logger.error(f"[AgentFramework] Tool: {tool_name}, Database: {database}")
-                        logger.error(f"[AgentFramework] Query contained {len(query)} chars")
-                        raise
-                    
-                    # Store query results in conversation context
-                    if normalized and isinstance(normalized, dict) and normalized.get("success"):
-                        context_service.update_from_query_result(normalized)
-                        try:
-                            if isinstance(normalized.get("table"), dict):
-                                TOOL_RESULTS_BUFFER.append(normalized)
-                        except Exception:  # noqa: BLE001
-                            pass
-                    
-                    return json.dumps(normalized)
-                else:
-                    return json.dumps({"success": False, "error": f"Missing required parameters for {tool_name}: clusterUrl, database, query"})
+                        if isinstance(normalized.get("table"), dict):
+                            TOOL_RESULTS_BUFFER.append(normalized)
+                    except Exception:  # noqa: BLE001
+                        pass
+                
+                return json.dumps(normalized)
             
             # For other tools, call MCP session directly
             elif hasattr(kusto_service, '_session') and kusto_service._session:
@@ -302,9 +267,7 @@ def create_instructions_mcp_tool_function(tool_name: str, tool_description: str)
     """
     
     async def instructions_mcp_tool_func(**kwargs: Any) -> str:
-        f"""Execute Instructions MCP tool: {tool_name}
-        
-        {tool_description}
+        """Execute Instructions MCP tool.
         
         Args:
             **kwargs: Tool-specific parameters
@@ -326,18 +289,35 @@ def create_instructions_mcp_tool_function(tool_name: str, tool_description: str)
             logger.info(f"[AgentFramework] Calling Instructions MCP tool '{tool_name}' with args: {actual_args}")
             
             if hasattr(instructions_service, '_session') and instructions_service._session:
+                # Normalize placeholder values to formats expected by Instructions MCP
+                if isinstance(actual_args, dict) and 'placeholder_values' in actual_args:
+                    placeholder_values = actual_args['placeholder_values']
+                    if isinstance(placeholder_values, dict):
+                        normalized: dict[str, Any] = {}
+                        for key, val in placeholder_values.items():
+                            normalized[key] = _normalize_placeholder_value(key, val)
+                        actual_args = {**actual_args, 'placeholder_values': normalized}
+                        logger.debug(f"[AgentFramework] Normalized placeholder values for {tool_name}: {normalized}")
+
                 result = await instructions_service._session.call_tool(tool_name, actual_args)
                 
-                # Convert result to JSON string
+                # Properly serialize the result
                 if hasattr(result, 'content'):
-                    # MCP result with content field
-                    content_items = result.content
-                    if content_items and len(content_items) > 0:
-                        first_item = content_items[0]
-                        if hasattr(first_item, 'text'):
-                            return str(first_item.text)  # type: ignore
+                    content = result.content
+                    if isinstance(content, list) and content:
+                        # Handle TextContent objects
+                        text_content = content[0]
+                        text_attr = getattr(text_content, 'text', None)
+                        if text_attr is not None:
+                            result_text = str(text_attr)
+                            # Log the response for debugging
+                            if len(result_text) <= 500:
+                                logger.info(f"[AgentFramework] Instructions MCP tool '{tool_name}' returned: {result_text}")
+                            else:
+                                logger.info(f"[AgentFramework] Instructions MCP tool '{tool_name}' returned {len(result_text)} chars: {result_text[:500]}...")
+                            return result_text
                         else:
-                            return json.dumps({"content": str(first_item)})
+                            return json.dumps({"content": str(text_content)})
                     return json.dumps({"content": "No content returned"})
                 else:
                     return json.dumps({"result": str(result)})
@@ -582,7 +562,7 @@ class AgentFrameworkService:
                 logger.info("Authentication validation successful after cache clear")
             except Exception as retry_e:
                 logger.error(f"Authentication validation failed even after cache clear: {retry_e}")
-                raise Exception(f"Authentication system not ready: {retry_e}")
+                raise Exception(f"Authentication system not ready: {retry_e}") from retry_e
 
     def _create_azure_chat_client(self, model_config: ModelConfiguration) -> AzureOpenAIChatClient:
         """Create Azure OpenAI chat client for Agent Framework
@@ -600,65 +580,62 @@ class AgentFrameworkService:
         )
     
     async def _discover_mcp_tools(self) -> list[Callable[..., Awaitable[str]]]:
-        """Discover and create tools from the MCP servers
+        """Discover and create tools from the MCP servers with Instructions MCP as primary source
         
         Returns a list of async functions that can be used as tools
         in the Agent Framework's function calling system.
+        
+        Tool Priority:
+        1. Instructions MCP tools (scenario management)
+        2. Kusto MCP execute_query only (query execution)
+        3. lookup_context (conversation state)
         """
+        tools: list[Callable[..., Awaitable[str]]] = []
+        
+        # Primary: Instructions MCP tools (scenario management)
+        try:
+            from services.instructions_mcp_service import get_instructions_service
+            instructions_service = await get_instructions_service()
+            
+            if hasattr(instructions_service, '_session') and instructions_service._session:
+                inst_tool_list = await instructions_service._session.list_tools()
+                inst_tools = getattr(inst_tool_list, "tools", [])
+                
+                # Add Instructions MCP tools FIRST (higher priority)
+                for tool in inst_tools:
+                    tool_name = getattr(tool, "name", "unknown")
+                    tool_desc = getattr(tool, "description", "No description")
+                    tool_func = create_instructions_mcp_tool_function(tool_name, tool_desc)
+                    tools.append(tool_func)
+                    logger.info(f"Added Instructions MCP tool: {tool_name}")
+            else:
+                logger.warning("Instructions MCP session not available")
+        except Exception as e:
+            logger.error(f"Failed to load Instructions MCP tools: {e}")
+        
+        # Secondary: Kusto MCP for query execution only
         try:
             from services.kusto_mcp_service import get_kusto_service
-            from services.instructions_mcp_service import get_instructions_service
-            
-            # Create function wrappers for each MCP tool
-            tools: list[Callable[..., Awaitable[str]]] = []
-            
-            # Legacy tools removed - using Instructions MCP instead
-            # - lookup_scenarios → search_scenarios (Instructions MCP)
-            # - lookup_context → get_query (Instructions MCP)
-            
-            # Initialize and discover Instructions MCP tools
-            try:
-                instructions_service = await get_instructions_service()
-                if hasattr(instructions_service, '_session') and instructions_service._session:
-                    inst_tool_list = await instructions_service._session.list_tools()
-                    inst_mcp_tools = getattr(inst_tool_list, "tools", [])
-                    
-                    for mcp_tool in inst_mcp_tools:
-                        tool_name = mcp_tool.name
-                        tool_description = getattr(mcp_tool, 'description', f'Instructions MCP tool: {tool_name}')
-                        
-                        # Create a function wrapper for this MCP tool
-                        tool_function = create_instructions_mcp_tool_function(tool_name, tool_description)
-                        tools.append(tool_function)
-                        logger.info(f"Created tool wrapper for Instructions MCP tool: {tool_name}")
-                else:
-                    logger.warning("Instructions MCP session not available")
-            except Exception as inst_err:
-                logger.error(f"Failed to discover Instructions MCP tools: {inst_err}")
-            
-            # Initialize and discover Kusto MCP tools
             kusto_service = await get_kusto_service()
+            
             if hasattr(kusto_service, '_session') and kusto_service._session:
-                tool_list = await kusto_service._session.list_tools()
-                mcp_tools = getattr(tool_list, "tools", [])
-                
-                for mcp_tool in mcp_tools:
-                    tool_name = mcp_tool.name
-                    tool_description = getattr(mcp_tool, 'description', f'Kusto MCP tool: {tool_name}')
-                    
-                    # Create a function wrapper for this MCP tool
-                    tool_function = create_mcp_tool_function(tool_name, tool_description)
-                    tools.append(tool_function)
-                    logger.info(f"Created tool wrapper for Kusto MCP tool: {tool_name}")
-                
-                return tools
+                # Only add execute_query from Kusto MCP
+                execute_func = create_mcp_tool_function("execute_query", 
+                    "Execute a Kusto query. Use ONLY with queries from substitute_and_get_query.")
+                tools.append(execute_func)
+                logger.info("Added execute_query tool from Kusto MCP")
             else:
-                logger.warning("Kusto MCP session not available for tool discovery")
-                return tools  # Return what we have (Instructions MCP tools)
-                
+                logger.warning("Kusto MCP session not available")
         except Exception as e:
-            logger.error(f"Failed to discover MCP tools: {e}")
-            return []
+            logger.error(f"Failed to load Kusto MCP: {e}")
+        
+        # Add context lookup (but not scenario lookup - Instructions MCP handles that)
+        context_func = create_context_lookup_function()
+        tools.append(context_func)
+        logger.info("Added lookup_context tool for conversation state access")
+        
+        logger.info(f"Total tools registered: {len(tools)}")
+        return tools
     
     async def create_intune_expert_agent(self, model_config: ModelConfiguration) -> ChatAgent:
         """Create the IntuneExpert agent using Agent Framework
@@ -671,77 +648,47 @@ class AgentFrameworkService:
         # Create the Azure OpenAI chat client
         chat_client = self._create_azure_chat_client(model_config)
         
-        # System instructions (same as Autogen version)
-        system_instructions = f"""
-        You are an Intune Expert assistant specializing in Microsoft Intune diagnostics and troubleshooting.
-        
-        Your role is to help support engineers by executing Kusto queries through MCP server tools
-        to retrieve and analyze Intune device diagnostics information.
-        
-        AVAILABLE DIAGNOSTIC SCENARIOS:
-        {self.scenario_service.get_scenario_summary()}
-        
-        WORKFLOW - HOW TO EXECUTE SCENARIOS (FOLLOW THIS ORDER STRICTLY):
-        
-        **PHASE 1: SCENARIO DISCOVERY (DO ONCE)**
-        1. Call search_scenarios ONCE with user's keywords
-           Returns: {{"results": [{{"slug": "scenario-name"}}]}}
-           Extract: results[0].slug
-        
-        2. Call get_scenario ONCE with the slug
-           Returns: {{"steps": [{{"step_number": 1, "query_id": "...", "placeholders": {{...}}, "dependencies": [...]}}]}}
-           Extract: Full steps array
-        
-        **PHASE 2: QUERY EXECUTION (DO FOR ALL STEPS)**
-        3. For EACH step in order (respecting dependencies):
-           a) Call substitute_and_get_query(query_id=step.query_id, placeholder_values={{key: value}})
-              Returns: {{"query_text": "SELECT ..."}}
-           b) Call execute_query(query=query_text)
-              Returns: Query results as JSON
-           c) Extract values needed for next steps' placeholders
-        
-        **PHASE 3: COMPLETION (REQUIRED)**
-        4. After ALL steps execute successfully:
-           - Format results as markdown tables
-           - Provide summary of findings
-           - Return final response to user
-           - **STOP CALLING TOOLS** - workflow is complete
-        
-        CRITICAL RULES:
-        - search_scenarios: Call EXACTLY ONCE (not multiple times with variations)
-        - get_scenario: Call EXACTLY ONCE with the slug from search
-        - After returning formatted results to user: STOP (do NOT call search_scenarios again)
-        - Do NOT loop back to Phase 1 after Phase 3
-        - Parallel execution allowed: If steps have same dependencies, run substitute_and_get_query + execute_query in parallel
-        
-        JSON PARSING:
-        - search_scenarios → results[0].slug
-        - get_scenario → steps array with query_id, placeholders, dependencies
-        - substitute_and_get_query → query_text field
-        - execute_query → table results
-        
-        COMPLETION DETECTION:
-        When you have executed all scenario steps and formatted the results:
-        1. Return the formatted tables and summary to the user
-        2. DO NOT make any more tool calls
-        3. DO NOT call search_scenarios or get_scenario again
-        4. The orchestrator will detect completion when you return text without tool calls
-        
-        If the orchestrator asks you to continue after you've returned results, respond with:
-        "Scenario execution completed. All queries have been executed and results returned."
-        
-        AVAILABLE TOOLS:
-        - search_scenarios(keywords or query): Find scenarios
-        - get_scenario(slug): Get scenario definition with all steps
-        - substitute_and_get_query(query_id, placeholder_values): Get executable query
-        - execute_query(query): Run Kusto query
-        
-        BEST PRACTICES:
-        - Execute all queries in scenario before returning results
-        - Use exact query text from substitute_and_get_query (do not modify)
-        - Extract identifiers from results to populate next step placeholders
-        - After final results returned: STOP (no more tool calls)
-        """
+        # SIMPLIFIED system instructions - focus on workflow, not anti-patterns
+        system_instructions = """You are an Intune Expert assistant specializing in Microsoft Intune diagnostics.
+
+Your primary role is to execute Kusto queries to retrieve and analyze Intune device information.
+
+WORKFLOW:
+1. Use search_scenarios(query) to find relevant scenarios
+2. Use get_scenario(slug) to get scenario details with steps
+3. For each step in order:
+   - Use substitute_and_get_query(query_id, placeholder_values) to get the query
+   - Use execute_query(query) to run it
+4. Format results as tables and provide summary
+
+AVAILABLE TOOLS:
+- search_scenarios: Find scenarios matching keywords
+- get_scenario: Get full scenario definition  
+- substitute_and_get_query: Get executable query with placeholders filled
+- execute_query: Run Kusto query
+- lookup_context: Get stored values from previous queries
+
+CRITICAL RULES:
+1. Execute scenarios step by step in sequential order (1, 2, 3, ...)
+2. Use exact queries from substitute_and_get_query - never modify them
+3. Don't write your own Kusto queries
+4. If a step fails validation, skip it and continue to the next step
+5. After completing all steps, format results and stop
+6. Present results as formatted markdown tables
+
+PLACEHOLDER HANDLING:
+- Always use PascalCase: DeviceId, StartTime, EndTime, EffectiveGroupIdList
+- Call lookup_context() if you need values from previous queries
+- Pass all placeholders to substitute_and_get_query as a dictionary
+
+EXAMPLE WORKFLOW:
+1. search_scenarios(query="device timeline") → Get slug
+2. get_scenario(slug="device-timeline") → Get steps array
+3. For each step:
+   - substitute_and_get_query(query_id="device-timeline_step1", placeholder_values={"DeviceId": "abc"})
+   - execute_query(query="SELECT ...") with the returned query_text
+4. Format all results and provide summary
+"""
         
         # Discover and create tools from MCP server
         tools = await self._discover_mcp_tools()
@@ -971,16 +918,17 @@ class AgentFrameworkService:
         """Handle Magentic Team callback events and log them to console.
         
         This callback receives all orchestrator and agent messages during workflow execution,
-        providing visibility into the multi-agent conversation.
+        providing visibility into the multi-agent conversation and tracking scenario execution state.
         
         Args:
             event: One of MagenticOrchestratorMessageEvent, MagenticAgentDeltaEvent,
                    MagenticAgentMessageEvent, or MagenticFinalResultEvent
         """
         try:
+            from services.scenario_state import scenario_tracker
+            
             if isinstance(event, MagenticOrchestratorMessageEvent):
                 # Orchestrator messages (planning, task ledger, instructions, notices)
-                orchestrator_id = getattr(event, 'orchestrator_id', 'orchestrator')
                 message = getattr(event, 'message', None)
                 kind = getattr(event, 'kind', 'unknown')
                 
@@ -998,9 +946,41 @@ class AgentFrameworkService:
                 # Log function calls if present
                 fn_call_name = getattr(event, 'function_call_name', None)
                 fn_result_id = getattr(event, 'function_result_id', None)
+                fn_result = getattr(event, 'function_result', None)
                 
                 if fn_call_name:
                     logger.info(f"[Magentic-Agent-{agent_id}] Function call: {fn_call_name}")
+                    
+                    # Track scenario initialization
+                    if fn_call_name == "get_scenario" and fn_result:
+                        try:
+                            result_data = json.loads(fn_result) if isinstance(fn_result, str) else fn_result
+                            if isinstance(result_data, dict) and 'steps' in result_data:
+                                slug = result_data.get('slug', 'unknown')
+                                scenario_tracker.start_scenario(slug, result_data['steps'])
+                                logger.info(f"Initialized tracking for scenario: {slug} with {len(result_data['steps'])} steps")
+                        except Exception as e:
+                            logger.error(f"Failed to parse scenario from get_scenario result: {e}")
+                    
+                    # Track step completion
+                    elif fn_call_name == "execute_query" and fn_result:
+                        scenario = scenario_tracker.get_active_scenario()
+                        if scenario:
+                            next_step = scenario.get_next_pending_step()
+                            if next_step:
+                                scenario.mark_step_complete(next_step.step_number, fn_result)
+                                logger.info(f"Marked step {next_step.step_number} complete - {scenario.get_progress_summary()}")
+                                
+                                # Store result in buffer for table extraction
+                                if isinstance(fn_result, str):
+                                    try:
+                                        result_obj = json.loads(fn_result)
+                                        if isinstance(result_obj, dict) and result_obj.get('success') and 'table' in result_obj:
+                                            TOOL_RESULTS_BUFFER.append(result_obj)
+                                            logger.debug(f"Added query result to buffer (total: {len(TOOL_RESULTS_BUFFER)})")
+                                    except Exception:
+                                        pass
+                
                 elif fn_result_id:
                     logger.info(f"[Magentic-Agent-{agent_id}] Function result received")
                 elif text:
@@ -1024,6 +1004,11 @@ class AgentFrameworkService:
                     message_text = getattr(message, 'text', '')
                     truncated = message_text[:300] + "..." if len(message_text) > 300 else message_text
                     logger.info(f"[Magentic-FinalResult] {truncated}")
+                
+                # Log final scenario progress
+                scenario = scenario_tracker.get_active_scenario()
+                if scenario:
+                    logger.info(f"[Workflow] Scenario completion: {scenario.get_progress_summary()}")
         
         except Exception as callback_err:
             logger.warning(f"Magentic event callback error: {callback_err}")
@@ -1051,12 +1036,12 @@ class AgentFrameworkService:
                 .participants(IntuneExpert=self.intune_expert_agent)
                 .with_standard_manager(
                     chat_client=self.chat_client,
-                    max_round_count=50,  # Increased to allow all 9 Device Timeline queries
-                    max_stall_count=5,   # Increased to avoid premature reset
+                    max_round_count=30,  # Reduced from 50 - prevents excessive looping (device-timeline has 8 steps)
+                    max_stall_count=3,   # Reduced from 5 - fail faster if stuck
                 )
                 .on_event(
                     self._magentic_event_callback,
-                    mode=MagenticCallbackMode.NON_STREAMING  # Use STREAMING for delta events
+                    mode=MagenticCallbackMode.STREAMING  # Enable delta events for task ledger updates
                 )
                 .build()
             )
@@ -1083,18 +1068,85 @@ class AgentFrameworkService:
         except Exception as e:
             error_msg = f"Failed to setup Agent Framework: {str(e)}"
             logger.error(error_msg)
-            raise Exception(error_msg)
+            raise Exception(error_msg) from e
+
+    def _build_placeholder_values(self, parameters: dict[str, Any], context_values: dict[str, Any]) -> dict[str, Any]:
+        """Build complete placeholder values with proper PascalCase conversion.
+        
+        This ensures that all placeholder names match the expected format in the MCP server,
+        regardless of whether they come from API parameters (snake_case) or context (snake_case).
+        
+        Args:
+            parameters: Initial parameters from the API request
+            context_values: Values from conversation state (lookup_context)
+            
+        Returns:
+            Dictionary with all placeholders in PascalCase format
+        """
+        placeholder_values: dict[str, Any] = {}
+
+        # Add initial parameters with PascalCase conversion
+        for key, value in parameters.items():
+            pascal_key = ''.join(word.capitalize() for word in key.split('_'))
+            normalized_value = _normalize_placeholder_value(pascal_key, value)
+            placeholder_values[pascal_key] = normalized_value
+        
+        # Add context values with proper case mapping
+        # Map snake_case context keys to PascalCase placeholder names
+        context_mapping = {
+            'device_id': 'DeviceId',
+            'account_id': 'AccountId',
+            'context_id': 'ContextId',
+            'tenant_id': 'TenantId',
+            'user_id': 'UserId',
+            'scale_unit_name': 'ScaleUnitName',
+            'serial_number': 'SerialNumber',
+            'device_name': 'DeviceName',
+            'azure_ad_device_id': 'AzureAdDeviceId',
+            'primary_user': 'PrimaryUser',
+            'enrolled_by_user': 'EnrolledByUser',
+            'start_time': 'StartTime',
+            'end_time': 'EndTime',
+            # List-based identifiers (critical for multi-step scenarios)
+            'effective_group_id_list': 'EffectiveGroupIdList',
+            'group_id_list': 'GroupIdList',
+            'policy_id_list': 'PolicyIdList'
+        }
+        
+        for context_key, context_value in context_values.items():
+            if context_value is not None:
+                pascal_key = context_mapping.get(context_key,
+                    ''.join(word.capitalize() for word in context_key.split('_')))
+                # Don't override if already set from parameters
+                if pascal_key not in placeholder_values:
+                    placeholder_values[pascal_key] = _normalize_placeholder_value(pascal_key, context_value)
+        
+        logger.info(f"[AgentFramework] Built placeholder values with {len(placeholder_values)} keys: {list(placeholder_values.keys())}")
+        
+        return placeholder_values
 
     async def query_diagnostics(self, query_type: str, parameters: dict[str, Any]) -> dict[str, Any]:
-        """Execute diagnostic query through the Magentic workflow orchestration"""
+        """Execute diagnostic query through the Magentic workflow orchestration
+        
+        Simplified version that focuses on clear instructions and state tracking.
+        """
         if not self.magentic_workflow:
             raise Exception("Magentic workflow not initialized")
         
         try:
-            logger.info(f"Executing diagnostic query: {query_type}")
-            # Clear any previous buffered tool results to avoid cross-query leakage
-            TOOL_RESULTS_BUFFER.clear()
+            from services.scenario_state import scenario_tracker
             
+            logger.info(f"Executing diagnostic query: {query_type}")
+            
+            # Clear state and buffers for fresh execution
+            TOOL_RESULTS_BUFFER.clear()
+            scenario_tracker.clear_scenario()
+            
+            from services.conversation_state import get_conversation_state_service
+            context_service = get_conversation_state_service()
+            # Reset conversation context so each diagnostics run starts clean with user-provided parameters
+            context_service.start_new_run(parameters)
+
             # Handle scenario execution directly
             if query_type == "scenario":
                 scenario_ref = parameters.get("scenario") or parameters.get("name") or parameters.get("index")
@@ -1119,171 +1171,111 @@ class AgentFrameworkService:
                     "errors": scenario_run.get("errors", []),
                 }
             
-            # Build scenario execution message with clear completion criteria
-            query_message = (
-                f"Execute the '{query_type}' diagnostic scenario with parameters: {parameters}\n\n"
-                f"WORKFLOW (follow this EXACTLY - do NOT deviate):\n"
-                f"1. Call search_scenarios ONCE with '{query_type}' keywords\n"
-                f"2. Extract results[0].slug from the JSON response\n"
-                f"3. Call get_scenario ONCE with that slug\n"
-                f"4. Get the steps array from the JSON response\n"
-                f"5. For EACH step in the steps array:\n"
-                f"   a) Call substitute_and_get_query(query_id, placeholder_values)\n"
-                f"   b) Extract query_text from the JSON response\n"
-                f"   c) Call execute_query(query=query_text)\n"
-                f"   d) Extract values from results for next step placeholders\n"
-                f"6. After ALL steps executed:\n"
-                f"   a) Format results as markdown tables\n"
-                f"   b) Provide summary of findings\n"
-                f"   c) Return final response\n"
-                f"   d) STOP - DO NOT call search_scenarios or get_scenario again\n\n"
-                f"PARALLEL EXECUTION: If multiple steps have the same dependencies (e.g., all need DeviceId "
-                f"from step 1), execute those substitute_and_get_query + execute_query calls in parallel.\n\n"
-                f"COMPLETION CRITERIA:\n"
-                f"You are DONE when:\n"
-                f"- All scenario steps have been executed (or attempted)\n"
-                f"- Results have been formatted and returned to user\n"
-                f"- You have provided a final text response (not just tool calls)\n"
-                f"After returning your final formatted response, make NO MORE TOOL CALLS.\n\n"
-            )
+            # Get all available context values
+            context_values = context_service.get_all_context()
+            
+            logger.info(f"[AgentFramework] Available context values: {list(context_values.keys())}")
+            
+            # Build complete placeholder values with proper PascalCase conversion
+            all_placeholder_values = self._build_placeholder_values(parameters, context_values)
+            
+            # Create JSON representation for instructions
+            placeholder_str = json.dumps(all_placeholder_values, indent=2)
+            
+            # Normalize query_type for search
+            normalized_query_type = query_type.replace('_', '-')
+            
+            # Specialized guidance for device timeline scenarios (mermaid output)
+            device_timeline_guidance = ""
+            if normalized_query_type in {"device-timeline", "device_timeline"}:
+                device_id = all_placeholder_values.get('DeviceId', 'DEVICE_ID')
+                start_time = all_placeholder_values.get('StartTime', 'START_TIME')
+                end_time = all_placeholder_values.get('EndTime', 'END_TIME')
+                device_timeline_guidance = (
+                    "\nSpecial Instructions for Device Timeline:\n"
+                    "You are an Intune diagnostics expert. Build a chronological device event timeline covering compliance status changes, policy assignment or evaluation outcomes, application install attempts (success/failure), device check-ins (including failures or long gaps), enrollment/sync events, and notable error events for the specified device and time window.\n"
+                    "1. Discover and aggregate relevant events via available tools / queries.\n"
+                    "2. Normalize timestamps to UTC ISO8601 (YYYY-MM-DD HH:MM).\n"
+                    "3. Group logically similar rapid events but keep important state transitions explicit.\n"
+                    "4. Output a concise narrative summary first (outside code fence).\n"
+                    "5. Then output EXACTLY ONE fenced mermaid code block using the 'timeline' syntax:\n"
+                    "```mermaid\n"
+                    "gantt\n"
+                    f"Title: Device Timeline ({device_id})\n"
+                    "Start: <earliest timestamp>\n"
+                    "<YYYY-MM-DD HH:MM>: <Category> - <Brief description>\n"
+                    "...\n"
+                    "```\n"
+                    "Rules:\n"
+                    "- Do not include any other fenced mermaid blocks.\n"
+                    "- Categories: Compliance, Policy, App, Check-in, Error, Enrollment, Other.\n"
+                    "- Limit to <= 60 events focusing on impactful changes.\n"
+                    "- If no events found, still return an empty timeline code block with a 'No significant events' note.\n"
+                    f"Parameters: device_id={device_id}, start_time={start_time}, end_time={end_time}. Return the narrative summary first, then the mermaid block.\n"
+                )
+
+            # SIMPLIFIED query message - clear and direct
+            base_query_message = f"""Execute the '{query_type}' scenario with these parameters:
+{placeholder_str}
+
+Steps:
+1. search_scenarios(query="{normalized_query_type}")
+2. get_scenario(slug) from the results
+3. Execute each step sequentially
+4. Return formatted results
+
+Do not restart or loop."""
+            query_message = base_query_message + device_timeline_guidance
             
             # Run the Magentic workflow with streaming
-            logger.info(f"[Magentic] Running workflow with query: {query_message[:100]}...")
+            logger.info(f"[Magentic] Running workflow for {query_type}")
             response_content = ""
-            extracted_objs = []
+            tables = []
             
             async for event in self.magentic_workflow.run_stream(query_message):
-                # Log orchestrator and agent events for debugging
-                if hasattr(event, '__class__'):
-                    event_type = event.__class__.__name__
-                    logger.info(f"[Magentic] Received event: {event_type}")
-                    
-                    # Log message content for debugging the conversation
-                    if hasattr(event, 'message'):
-                        msg = getattr(event, 'message', None)
-                        if msg:
-                            # Log sender if available
-                            sender = getattr(msg, 'sender', 'unknown')
-                            role = getattr(msg, 'role', 'unknown')
-                            
-                            # Extract text content
-                            msg_text = ""
-                            if hasattr(msg, 'text') and getattr(msg, 'text'):
-                                msg_text = getattr(msg, 'text')
-                            elif hasattr(msg, 'contents') and getattr(msg, 'contents'):
-                                contents = getattr(msg, 'contents')
-                                text_parts = []
-                                for c in contents:
-                                    if hasattr(c, 'text') and getattr(c, 'text'):
-                                        text_parts.append(str(getattr(c, 'text')))
-                                    elif hasattr(c, '__class__'):
-                                        # Log non-text content types (like function calls/results)
-                                        content_type = c.__class__.__name__
-                                        if 'function' in content_type.lower() or 'tool' in content_type.lower():
-                                            logger.info(f"[Magentic] {event_type} contains {content_type}")
-                                msg_text = " ".join(text_parts) if text_parts else ""
-                            
-                            # Log the message with truncation for long messages
-                            if msg_text:
-                                truncated = msg_text[:500] + "..." if len(msg_text) > 500 else msg_text
-                                logger.info(f"[Magentic] {event_type} from {sender} ({role}): {truncated}")
-                            else:
-                                logger.info(f"[Magentic] {event_type} from {sender} ({role}): <no text content>")
-                
                 # Capture the final output
                 if isinstance(event, WorkflowOutputEvent):
                     logger.info("[Magentic] Received WorkflowOutputEvent - task completed")
-                    # Robust extraction of textual content from Agent Framework objects
                     data = getattr(event, 'data', None)
                     extracted_text = ""
                     try:
                         if data is None:
                             extracted_text = ""
-                        # ChatResponse has .text
-                        elif hasattr(data, 'text') and getattr(data, 'text'):
-                            extracted_text = getattr(data, 'text')  # type: ignore[assignment]
-                        # Some objects might expose 'content'
-                        elif hasattr(data, 'content') and getattr(data, 'content'):
-                            extracted_text = str(getattr(data, 'content'))
-                        # ChatMessage has .contents (list) – join any text parts
-                        elif hasattr(data, 'contents') and getattr(data, 'contents'):
-                            contents = getattr(data, 'contents')
+                        elif hasattr(data, 'text') and data.text:
+                            extracted_text = data.text  # type: ignore[assignment]
+                        elif hasattr(data, 'content') and data.content:
+                            extracted_text = str(data.content)
+                        elif hasattr(data, 'contents') and data.contents:
+                            contents = data.contents
                             try:
                                 extracted_text = " ".join(
-                                    c.text for c in contents if hasattr(c, 'text') and getattr(c, 'text')
+                                    c.text for c in contents if hasattr(c, 'text') and c.text
                                 )
                             except Exception:  # noqa: BLE001
                                 extracted_text = ""
                             if not extracted_text:
-                                # Fallback to repr if still empty
                                 extracted_text = str(data)
                         else:
                             extracted_text = str(data)
                     except Exception as extract_err:  # noqa: BLE001
-                        logger.warning(f"[Magentic] Failed to extract text from workflow output: {extract_err}")
+                        logger.warning(f"Failed to extract text from workflow output: {extract_err}")
                         extracted_text = str(data) if data else ""
                     response_content = extracted_text
-                
-                # Extract tables from function result events
-                # The workflow may emit events with function call results
-                if hasattr(event, 'message'):
-                    event_message = getattr(event, 'message', None)
-                    if event_message and hasattr(event_message, 'contents'):
-                        logger.debug(f"[Magentic] Event message has {len(event_message.contents)} content items (query_diagnostics phase)")
-                        try:
-                            from agent_framework._types import FunctionResultContent
-                        except ImportError:
-                            from agent_framework import FunctionResultContent
-                        
-                        for content in event_message.contents:
-                            try:
-                                # Function/tool result content
-                                if isinstance(content, FunctionResultContent) or hasattr(content, 'result'):
-                                    if hasattr(content, 'result') and getattr(content, 'result'):
-                                        result_data = getattr(content, 'result')
-                                        logger.debug(f"[Magentic] FunctionResultContent detected (type={type(result_data)})")
-                                        if isinstance(result_data, dict):
-                                            extracted_objs.append(result_data)
-                                        elif isinstance(result_data, str):
-                                            try:
-                                                parsed = json.loads(result_data)
-                                                if isinstance(parsed, dict):
-                                                    extracted_objs.append(parsed)
-                                            except json.JSONDecodeError:
-                                                multi = self._extract_json_objects(result_data)
-                                                if multi:
-                                                    extracted_objs.extend(obj for obj in multi if isinstance(obj, dict))
-                                # Text content JSON scan
-                                if hasattr(content, 'text') and getattr(content, 'text'):
-                                    text_val = getattr(content, 'text')
-                                    logger.debug(f"[Magentic] Text content candidate length={len(text_val)} (query_diagnostics)")
-                                    if ('{' in text_val and '}' in text_val) or ('[' in text_val and ']' in text_val):
-                                        objs = self._extract_json_objects(text_val)
-                                        if objs:
-                                            logger.debug(f"[Magentic] Extracted {len(objs)} JSON object(s) from text content")
-                                            extracted_objs.extend(obj for obj in objs if isinstance(obj, dict))
-                            except Exception as content_err:  # noqa: BLE001
-                                logger.debug(f"[Magentic] Content parsing error (query_diagnostics): {content_err}")
             
-            logger.info(f"[Magentic] query_diagnostics: Extracted {len(extracted_objs)} objects from function results")
-            if extracted_objs:
-                logger.debug("[Magentic] Raw extracted objects sample (first 1): %s", json.dumps(extracted_objs[0])[:500])
+            # Extract tables from buffer (populated by event callback)
+            if TOOL_RESULTS_BUFFER:
+                for result in TOOL_RESULTS_BUFFER:
+                    if 'table' in result:
+                        tables.append(result['table'])
+                logger.info(f"Extracted {len(tables)} tables from buffer")
             
-            # If no objects from function results, try extracting from text response (fallback)
-            if not extracted_objs:
-                logger.info("[Magentic] query_diagnostics: No function results found, trying to extract from response text")
-                extracted_objs = self._extract_json_objects(response_content)
-                logger.info(f"[Magentic] query_diagnostics: Extracted {len(extracted_objs)} JSON objects from response text")
-            
-            # Extract mermaid timeline if requested
+            # Extract mermaid timeline if present in final response
             mermaid_block: str | None = None
-            if query_type == "device_timeline":
-                import re
+            if isinstance(response_content, str):
                 pattern = re.compile(r"```mermaid\s+([\s\S]*?)```", re.IGNORECASE)
                 match = pattern.search(response_content)
                 if match:
                     mermaid_block = match.group(1).strip()
-                # Heuristic fallback
                 elif "timeline" in response_content.lower():
                     lines = response_content.splitlines()
                     collected: list[str] = []
@@ -1299,64 +1291,35 @@ class AgentFrameworkService:
                             collected.append(ln)
                     if len(collected) > 1:
                         mermaid_block = "\n".join(collected).strip()
-            
-            # Normalize and dedupe tables
-            tables_all = self._normalize_table_objects(extracted_objs)
-            unique_tables = self._dedupe_tables(tables_all)
 
-            # Fallback: if streaming yielded no tables but MCP normalized results were buffered
-            if (not unique_tables) and TOOL_RESULTS_BUFFER:
-                buffered_tables: list[dict[str, Any]] = []
-                for entry in TOOL_RESULTS_BUFFER:
-                    table_obj = entry.get("table") if isinstance(entry, dict) else None
-                    if isinstance(table_obj, dict) and table_obj.get("columns") and table_obj.get("rows"):
-                        buffered_tables.append({
-                            "columns": table_obj.get("columns", []),
-                            "rows": table_obj.get("rows", []),
-                            "total_rows": table_obj.get("total_rows", len(table_obj.get("rows", [])))
-                        })
-                if buffered_tables:
-                    unique_tables = self._dedupe_tables(buffered_tables)
-                    logger.info(f"[Magentic] Fallback buffer recovered {len(unique_tables)} table(s) for query_diagnostics")
-                TOOL_RESULTS_BUFFER.clear()
-            
-            if unique_tables:
-                logger.debug(f"[query_diagnostics] Total tables after normalization: {len(unique_tables)}")
-
-            # Add synthetic mermaid table if we captured a block
             if mermaid_block:
                 mermaid_table = {"columns": ["mermaid_timeline"], "rows": [[mermaid_block]], "total_rows": 1}
-                if unique_tables:
-                    unique_tables = unique_tables + [mermaid_table]
-                else:
-                    unique_tables = [mermaid_table]
-                response_content = response_content + "\n\n[Mermaid timeline extracted successfully]"
+                tables.append(mermaid_table)
+                response_content = f"{response_content}\n\n[Mermaid timeline extracted successfully]"
 
-            # Clean the summary by removing raw JSON objects (they're already in tables)
-            # This prevents the AI summary from showing garbled table data
-            summary_content = self._clean_summary_from_json(response_content)
+            # Clean up the summary
+            summary = self._clean_summary_from_json(response_content)
+            
+            # Log progress
+            progress = scenario_tracker.get_progress_info()
+            logger.info(f"[AgentFramework] {progress}")
             
             return {
                 "query_type": query_type,
                 "parameters": parameters,
                 "response": response_content,
-                "summary": summary_content or f"Executed {query_type} query via Agent Framework",
-                "tables": unique_tables if unique_tables else None,
-                "mermaid_timeline": mermaid_block,
+                "tables": tables or None,
+                "summary": summary,
+                "mermaid_timeline": mermaid_block
             }
             
         except Exception as e:
-            error_msg = str(e) if str(e) else f"Unknown error of type {type(e).__name__}"
-            logger.error(f"Diagnostic query failed: {error_msg}")
+            logger.error(f"Diagnostic query failed: {e}", exc_info=True)
             return {
                 "query_type": query_type,
                 "parameters": parameters,
-                "tables": [{
-                    "columns": ["Error"],
-                    "rows": [[error_msg]],
-                    "total_rows": 1
-                }],
-                "summary": f"Diagnostic query failed: {error_msg}"
+                "error": str(e),
+                "summary": f"Failed to execute diagnostic query: {e}"
             }
 
     async def chat(self, message: str, extra_parameters: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1473,14 +1436,14 @@ The task is NOT complete until a user-facing response is given.
                             
                             # Extract text content
                             msg_text = ""
-                            if hasattr(msg, 'text') and getattr(msg, 'text'):
-                                msg_text = getattr(msg, 'text')
-                            elif hasattr(msg, 'contents') and getattr(msg, 'contents'):
-                                contents = getattr(msg, 'contents')
+                            if hasattr(msg, 'text') and msg.text:
+                                msg_text = msg.text
+                            elif hasattr(msg, 'contents') and msg.contents:
+                                contents = msg.contents
                                 text_parts = []
                                 for c in contents:
-                                    if hasattr(c, 'text') and getattr(c, 'text'):
-                                        text_parts.append(str(getattr(c, 'text')))
+                                    if hasattr(c, 'text') and c.text:
+                                        text_parts.append(str(c.text))
                                     elif hasattr(c, '__class__'):
                                         # Log non-text content types (like function calls/results)
                                         content_type = c.__class__.__name__
@@ -1504,15 +1467,15 @@ The task is NOT complete until a user-facing response is given.
                     try:
                         if data is None:
                             extracted_text = ""
-                        elif hasattr(data, 'text') and getattr(data, 'text'):
-                            extracted_text = getattr(data, 'text')  # ChatResponse or ChatMessage.text
-                        elif hasattr(data, 'content') and getattr(data, 'content'):
-                            extracted_text = str(getattr(data, 'content'))
-                        elif hasattr(data, 'contents') and getattr(data, 'contents'):
-                            contents = getattr(data, 'contents')
+                        elif hasattr(data, 'text') and data.text:
+                            extracted_text = data.text  # ChatResponse or ChatMessage.text
+                        elif hasattr(data, 'content') and data.content:
+                            extracted_text = str(data.content)
+                        elif hasattr(data, 'contents') and data.contents:
+                            contents = data.contents
                             try:
                                 extracted_text = " ".join(
-                                    c.text for c in contents if hasattr(c, 'text') and getattr(c, 'text')
+                                    c.text for c in contents if hasattr(c, 'text') and c.text
                                 )
                             except Exception:  # noqa: BLE001
                                 extracted_text = ""
@@ -1538,8 +1501,8 @@ The task is NOT complete until a user-facing response is given.
                         for content in event_message.contents:
                             try:
                                 if isinstance(content, FunctionResultContent) or hasattr(content, 'result'):
-                                    if hasattr(content, 'result') and getattr(content, 'result'):
-                                        result_data = getattr(content, 'result')
+                                    if hasattr(content, 'result') and content.result:
+                                        result_data = content.result
                                         logger.debug(f"[Magentic] FunctionResultContent detected (type={type(result_data)})")
                                         if isinstance(result_data, dict):
                                             extracted_objs.append(result_data)
@@ -1552,8 +1515,8 @@ The task is NOT complete until a user-facing response is given.
                                                 multi = self._extract_json_objects(result_data)
                                                 if multi:
                                                     extracted_objs.extend(obj for obj in multi if isinstance(obj, dict))
-                                if hasattr(content, 'text') and getattr(content, 'text'):
-                                    text_val = getattr(content, 'text')
+                                text_val = getattr(content, 'text', None)
+                                if text_val:
                                     logger.debug(f"[Magentic] Text content candidate length={len(text_val)} (chat phase)")
                                     if ('{' in text_val and '}' in text_val) or ('[' in text_val and ']' in text_val):
                                         objs = self._extract_json_objects(text_val)
