@@ -15,21 +15,20 @@ import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, TypeAlias
 
 # Agent Framework imports (equivalent to Autogen)
 # The agent-framework package provides the core chat agent functionality
 # Documentation: https://github.com/microsoft/agent-framework/tree/main/python
 from agent_framework import (
     ChatAgent,
-    MagenticBuilder,
-    WorkflowOutputEvent,
-)
-from agent_framework._workflows._magentic import (
     MagenticAgentDeltaEvent,
     MagenticAgentMessageEvent,
+    MagenticBuilder,
+    MagenticCallbackMode,
     MagenticFinalResultEvent,
     MagenticOrchestratorMessageEvent,
+    WorkflowOutputEvent,
 )
 from agent_framework.azure import AzureOpenAIChatClient
 from models.schemas import ModelConfiguration
@@ -45,7 +44,7 @@ logger = logging.getLogger(__name__)
 TOOL_RESULTS_BUFFER: list[dict[str, Any]] = []
 
 # Define the Union type for Magentic callback events
-MagenticCallbackEvent = (
+MagenticCallbackEvent: TypeAlias = (
     MagenticOrchestratorMessageEvent
     | MagenticAgentDeltaEvent
     | MagenticAgentMessageEvent
@@ -634,8 +633,17 @@ class AgentFrameworkService:
                 inst_tools = getattr(inst_tool_list, "tools", [])
                 
                 # Add Instructions MCP tools FIRST (higher priority)
+                # Skip validate_placeholders - substitute_and_get_query auto-validates
                 for tool in inst_tools:
                     tool_name = getattr(tool, "name", "unknown")
+                    
+                    # Skip validate_placeholders - it's redundant since substitute_and_get_query
+                    # validates by default (validate=True). This prevents the agent from making
+                    # 2-3 failed attempts at calling validate_placeholders with wrong parameters.
+                    if tool_name == "validate_placeholders":
+                        logger.info(f"Skipping {tool_name} - auto-validation handled by substitute_and_get_query")
+                        continue
+                    
                     tool_desc = getattr(tool, "description", "No description")
                     tool_func = create_instructions_mcp_tool_function(tool_name, tool_desc)
                     tools.append(tool_func)
@@ -690,13 +698,15 @@ WORKFLOW:
 2. Use get_scenario(slug) to get scenario details with steps
 3. For each step in order:
    - Use substitute_and_get_query(query_id, placeholder_values) to get the query
+     (This automatically validates placeholders - no separate validation needed)
    - Use execute_query(query) to run it
 4. Format results as tables and provide summary
 
 AVAILABLE TOOLS:
 - search_scenarios: Find scenarios matching keywords
 - get_scenario: Get full scenario definition  
-- substitute_and_get_query: Get executable query with placeholders filled
+- get_query: Get raw query text for a specific query_id
+- substitute_and_get_query: Get executable query with placeholders filled and validated
 - execute_query: Run Kusto query
 - lookup_context: Get stored values from previous queries
 
@@ -704,7 +714,7 @@ CRITICAL RULES:
 1. Execute scenarios step by step in sequential order (1, 2, 3, ...)
 2. Use exact queries from substitute_and_get_query - never modify them
 3. Don't write your own Kusto queries
-4. If a step fails validation, skip it and continue to the next step
+4. substitute_and_get_query validates automatically - don't call separate validation
 5. After completing all steps, format results and stop
 6. Present results as formatted markdown tables
 
@@ -712,12 +722,14 @@ PLACEHOLDER HANDLING:
 - Always use PascalCase: DeviceId, StartTime, EndTime, EffectiveGroupIdList
 - Call lookup_context() if you need values from previous queries
 - Pass all placeholders to substitute_and_get_query as a dictionary
+- If substitute_and_get_query returns validation errors, fix the values and retry
 
 EXAMPLE WORKFLOW:
 1. search_scenarios(query="device timeline") → Get slug
 2. get_scenario(slug="device-timeline") → Get steps array
 3. For each step:
    - substitute_and_get_query(query_id="device-timeline_step1", placeholder_values={"DeviceId": "abc"})
+     → Returns validated query with placeholders filled
    - execute_query(query="SELECT ...") with the returned query_text
 4. Format all results and provide summary
 """
@@ -1060,9 +1072,6 @@ EXAMPLE WORKFLOW:
             # This is equivalent to Autogen's MagenticOneGroupChat
             logger.info("Building Magentic workflow with IntuneExpert agent...")
             
-            # Import MagenticCallbackMode for streaming configuration
-            from agent_framework._workflows._magentic import MagenticCallbackMode
-            
             self.magentic_workflow = (
                 MagenticBuilder()
                 .participants(IntuneExpert=self.intune_expert_agent)
@@ -1073,7 +1082,7 @@ EXAMPLE WORKFLOW:
                 )
                 .on_event(
                     self._magentic_event_callback,
-                    mode=MagenticCallbackMode.STREAMING  # Enable delta events for task ledger updates
+                    mode=MagenticCallbackMode  # Enable delta events for task ledger updates
                 )
                 .build()
             )
