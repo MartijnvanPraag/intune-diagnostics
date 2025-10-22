@@ -1082,7 +1082,7 @@ EXAMPLE WORKFLOW:
                 )
                 .on_event(
                     self._magentic_event_callback,
-                    mode=MagenticCallbackMode  # Enable delta events for task ledger updates
+                    mode=MagenticCallbackMode.NON_STREAMING  # Enable delta events for task ledger updates
                 )
                 .build()
             )
@@ -1235,6 +1235,7 @@ EXAMPLE WORKFLOW:
                 device_timeline_guidance = (
                     "\nSpecial Instructions for Device Timeline:\n"
                     "You are an Intune diagnostics expert. Build a chronological device event timeline covering compliance status changes, policy assignment or evaluation outcomes, application install attempts (success/failure), device check-ins (including failures or long gaps), enrollment/sync events, and notable error events for the specified device and time window.\n"
+                    "IMPORTANT: This scenario contains 8 Kusto queries. Ensure you run all queries in this scenario.\n"
                     "1. Discover and aggregate relevant events via available tools / queries.\n"
                     "2. Normalize timestamps to UTC ISO8601 (YYYY-MM-DD HH:MM).\n"
                     "3. Group logically similar rapid events but keep important state transitions explicit.\n"
@@ -1250,7 +1251,6 @@ EXAMPLE WORKFLOW:
                     "Rules:\n"
                     "- Do not include any other fenced mermaid blocks.\n"
                     "- Categories: Compliance, Policy, App, Check-in, Error, Enrollment, Other.\n"
-                    "- Limit to <= 60 events focusing on impactful changes.\n"
                     "- If no events found, still return an empty timeline code block with a 'No significant events' note.\n"
                     f"Parameters: device_id={device_id}, start_time={start_time}, end_time={end_time}. Return the narrative summary first, then the mermaid block.\n"
                 )
