@@ -3,6 +3,7 @@ from typing import List, Optional, cast, Union
 from fastapi import APIRouter, HTTPException, Depends, Query, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
+from sqlalchemy.engine import CursorResult
 from models.database import DiagnosticSession, ModelConfiguration, ChatSession, ChatMessage
 from models.schemas import DiagnosticRequest, DiagnosticResponse, AgentResponse
 from pydantic import BaseModel
@@ -563,7 +564,7 @@ async def delete_sessions(
                 delete(DiagnosticSession)
                 .where(DiagnosticSession.session_id.in_(payload.session_ids))
             )
-            deleted = del_result.rowcount or 0
+            deleted = cast(CursorResult, del_result).rowcount or 0
             await db.commit()
             # (debug removed) Bulk delete result
             return {"message": f"Deleted {deleted} session(s)", "deleted": deleted}
@@ -572,7 +573,7 @@ async def delete_sessions(
             result = await db.execute(
                 delete(DiagnosticSession).where(DiagnosticSession.user_id == user_id)
             )
-            deleted = result.rowcount or 0
+            deleted = cast(CursorResult, result).rowcount or 0
             await db.commit()
             # (debug removed) Delete ALL sessions result
             return {"message": f"Deleted {deleted} session(s)", "deleted": deleted}
@@ -657,7 +658,7 @@ async def delete_recent_sessions(
             .where(DiagnosticSession.user_id == user_id)
             .where(DiagnosticSession.session_id.in_(session_ids))
         )
-        deleted = del_result.rowcount or 0
+        deleted = cast(CursorResult, del_result).rowcount or 0
         await db.commit()
     # (debug removed) Recent sessions deletion result
         return {"message": f"Deleted {deleted} recent session(s)", "deleted": deleted}
