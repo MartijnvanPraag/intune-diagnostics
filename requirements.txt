@@ -5,10 +5,6 @@ a2a-sdk==0.3.10
     # via agent-framework-a2a
 agent-framework==1.0.0b251016
     # via intune-diagnostics-backend
-redisvl>=0.8.2
-    # via agent-framework-redis
-redis>=6.4.0
-    # via agent-framework-redis
 agent-framework-a2a==1.0.0b251016
     # via agent-framework
 agent-framework-azure-ai==1.0.0b251016
