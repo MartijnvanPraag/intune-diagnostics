@@ -47,15 +47,25 @@ jobs:
         run: |
           cd frontend
           npm run build
+          echo "Frontend build completed"
+          ls -la dist || echo "dist directory not found!"
+          cd ..
 
       - name: Create deployment package
         run: |
           # Create a directory for deployment
           mkdir -p deployment
+          mkdir -p deployment/frontend
           
           # Copy backend files
           cp -r backend deployment/
-          cp -r frontend/dist deployment/frontend/dist
+          
+          # Copy frontend build (if it exists)
+          if [ -d "frontend/dist" ]; then
+            cp -r frontend/dist deployment/frontend/dist
+          else
+            echo "Warning: frontend/dist not found, skipping frontend files"
+          fi
           
           # Copy Python dependencies
           cp pyproject.toml deployment/
