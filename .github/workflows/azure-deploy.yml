@@ -37,6 +37,12 @@ jobs:
       - name: Install Python dependencies
         run: |
           uv sync
+          
+      - name: Export requirements.txt for Azure
+        run: |
+          uv export --no-hashes --format requirements-txt > requirements.txt
+          echo "Generated requirements.txt:"
+          head -20 requirements.txt
 
       - name: Install frontend dependencies
         run: |
@@ -67,9 +73,8 @@ jobs:
             echo "Warning: frontend/dist not found, skipping frontend files"
           fi
           
-          # Copy Python dependencies
-          cp pyproject.toml deployment/
-          cp uv.lock deployment/
+          # Copy Python requirements
+          cp requirements.txt deployment/
           
           # Copy startup script
           cp startup.sh deployment/
