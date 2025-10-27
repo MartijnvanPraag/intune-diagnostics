@@ -563,7 +563,7 @@ async def delete_sessions(
                 delete(DiagnosticSession)
                 .where(DiagnosticSession.session_id.in_(payload.session_ids))
             )
-            deleted = del_result.rowcount or 0
+            deleted = getattr(del_result, 'rowcount', 0)
             await db.commit()
             # (debug removed) Bulk delete result
             return {"message": f"Deleted {deleted} session(s)", "deleted": deleted}
@@ -572,7 +572,7 @@ async def delete_sessions(
             result = await db.execute(
                 delete(DiagnosticSession).where(DiagnosticSession.user_id == user_id)
             )
-            deleted = result.rowcount or 0
+            deleted = getattr(result, 'rowcount', 0)
             await db.commit()
             # (debug removed) Delete ALL sessions result
             return {"message": f"Deleted {deleted} session(s)", "deleted": deleted}
@@ -657,7 +657,7 @@ async def delete_recent_sessions(
             .where(DiagnosticSession.user_id == user_id)
             .where(DiagnosticSession.session_id.in_(session_ids))
         )
-        deleted = del_result.rowcount or 0
+        deleted = getattr(del_result, 'rowcount', 0)
         await db.commit()
     # (debug removed) Recent sessions deletion result
         return {"message": f"Deleted {deleted} recent session(s)", "deleted": deleted}
