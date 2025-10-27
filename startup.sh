@@ -1,5 +1,5 @@
 #!/bin/bash
-# Azure App Service startup script
+# Azure App Service startup script for Oryx deployment
 
 echo "Starting Intune Diagnostics Application..."
 
@@ -7,26 +7,23 @@ echo "Starting Intune Diagnostics Application..."
 PORT="${PORT:-8000}"
 echo "Using port: $PORT"
 
-# Navigate to backend directory
-cd /home/site/wwwroot/backend
-
-# Activate virtual environment (created by Oryx during deployment)
-if [ -d "/home/site/wwwroot/antenv" ]; then
-    source /home/site/wwwroot/antenv/bin/activate
-    echo "Virtual environment activated"
-else
-    echo "Warning: Virtual environment not found at /home/site/wwwroot/antenv"
-fi
+# Oryx sets PYTHONPATH to include the app directory
+# The virtual environment is already activated by Oryx's wrapper script
+echo "Current directory: $(pwd)"
+echo "PYTHONPATH: $PYTHONPATH"
 
 # Run database migrations if needed
 # python -m alembic upgrade head
 
 # Start the FastAPI application on the port Azure expects
+# Since our structure has backend/main.py, we need to import backend.main:app
 echo "Starting Gunicorn on 0.0.0.0:$PORT"
-gunicorn main:app \
+exec gunicorn backend.main:app \
     --workers 4 \
     --worker-class uvicorn.workers.UvicornWorker \
     --bind "0.0.0.0:$PORT" \
     --timeout 600 \
+    --access-logfile - \
+    --error-logfile -
     --access-logfile - \
     --error-logfile -
