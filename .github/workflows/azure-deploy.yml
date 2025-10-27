@@ -59,40 +59,44 @@ jobs:
 
       - name: Create deployment package
         run: |
-          # For Azure App Service, we deploy the source and let Oryx build on the server
-          # Create a clean deployment directory
-          mkdir -p deployment
+          # For Azure App Service ZIP deploy - files must be at root of ZIP, not in a subdirectory
+          # Copy everything to a temporary location, then zip from there
           
           # Copy backend source
-          cp -r backend deployment/
+          cp -r backend .deploy_temp/
           
           # Copy frontend build
           if [ -d "frontend/dist" ]; then
-            mkdir -p deployment/frontend
-            cp -r frontend/dist deployment/frontend/dist
+            mkdir -p .deploy_temp/frontend
+            cp -r frontend/dist .deploy_temp/frontend/dist
             echo "Frontend dist copied"
           else
             echo "Warning: frontend/dist not found"
           fi
           
           # Copy Python requirements (Oryx will use this)
-          cp requirements.txt deployment/
+          cp requirements.txt .deploy_temp/
           
           # Copy startup script to root (where Oryx expects it)
-          cp startup.sh deployment/
+          cp startup.sh .deploy_temp/
           
           # List what we're deploying
           echo "Deployment package contents:"
-          ls -la deployment/
+          ls -la .deploy_temp/
           
-          # Don't zip - deploy the folder directly
-          # Azure App Service works better with folder deployment
+          # Create ZIP from inside the temp directory (so files are at root of ZIP)
+          cd .deploy_temp
+          zip -r ../deploy.zip .
+          cd ..
+          
+          echo "ZIP file created:"
+          ls -lh deploy.zip
 
       - name: Upload artifact for deployment
         uses: actions/upload-artifact@v4
         with:
           name: python-app
-          path: deployment/
+          path: deploy.zip
 
   deploy:
     runs-on: ubuntu-latest
@@ -106,7 +110,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: python-app
-          path: .
+
+      - name: Debug - List downloaded files
+        run: |
+          echo "Current directory:"
+          pwd
+          echo "Files in current directory:"
+          ls -la
 
       - name: Deploy to Azure Web App
         id: deploy-to-webapp
@@ -115,4 +125,4 @@ jobs:
           app-name: 'intunediagnostics'
           slot-name: 'Production'
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
-          package: .
+          package: deploy.zip
