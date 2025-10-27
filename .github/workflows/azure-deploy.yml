@@ -106,7 +106,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: python-app
-          path: deployment
+          path: .
 
       - name: Deploy to Azure Web App
         id: deploy-to-webapp
@@ -115,4 +115,4 @@ jobs:
           app-name: 'intunediagnostics'
           slot-name: 'Production'
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
-          package: deployment
+          package: .
