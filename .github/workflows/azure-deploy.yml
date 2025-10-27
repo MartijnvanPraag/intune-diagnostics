@@ -59,36 +59,40 @@ jobs:
 
       - name: Create deployment package
         run: |
-          # Create a directory for deployment
+          # For Azure App Service, we deploy the source and let Oryx build on the server
+          # Create a clean deployment directory
           mkdir -p deployment
-          mkdir -p deployment/frontend
           
-          # Copy backend files
+          # Copy backend source
           cp -r backend deployment/
           
-          # Copy frontend build (if it exists)
+          # Copy frontend build
           if [ -d "frontend/dist" ]; then
+            mkdir -p deployment/frontend
             cp -r frontend/dist deployment/frontend/dist
+            echo "Frontend dist copied"
           else
-            echo "Warning: frontend/dist not found, skipping frontend files"
+            echo "Warning: frontend/dist not found"
           fi
           
-          # Copy Python requirements
+          # Copy Python requirements (Oryx will use this)
           cp requirements.txt deployment/
           
-          # Copy startup script
+          # Copy startup script to root (where Oryx expects it)
           cp startup.sh deployment/
           
-          # Create archive
-          cd deployment
-          zip -r ../deployment.zip .
-          cd ..
+          # List what we're deploying
+          echo "Deployment package contents:"
+          ls -la deployment/
+          
+          # Don't zip - deploy the folder directly
+          # Azure App Service works better with folder deployment
 
       - name: Upload artifact for deployment
         uses: actions/upload-artifact@v4
         with:
           name: python-app
-          path: deployment.zip
+          path: deployment/
 
   deploy:
     runs-on: ubuntu-latest
@@ -102,9 +106,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: python-app
-
-      - name: Unzip artifact for deployment
-        run: unzip deployment.zip
+          path: deployment
 
       - name: Deploy to Azure Web App
         id: deploy-to-webapp
@@ -113,4 +115,4 @@ jobs:
           app-name: 'intunediagnostics'
           slot-name: 'Production'
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
-          package: .
+          package: deployment
