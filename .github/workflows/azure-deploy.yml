@@ -40,7 +40,7 @@ jobs:
           
       - name: Export requirements.txt for Azure
         run: |
-          uv export --no-hashes --no-editable --format requirements-txt > requirements.txt
+          uv export --no-hashes --no-editable --format requirements-txt | grep -v "^\." > requirements.txt
           echo "Generated requirements.txt:"
           head -20 requirements.txt
 
