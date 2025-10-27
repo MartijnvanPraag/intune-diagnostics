@@ -17,6 +17,9 @@ logging.basicConfig(
     force=True  # Force reconfiguration if already configured
 )
 
+# Get logger for main module
+logger = logging.getLogger(__name__)
+
 # Configure logging to suppress MCP JSONRPC validation errors
 # These occur because the Kusto MCP server incorrectly writes logs to stdout
 # The MCP client still works correctly, so we suppress these non-critical errors
@@ -53,11 +56,18 @@ security = HTTPBearer()
 async def lifespan(app: FastAPI):
     # Initialize database
     await init_db()
-    # Initialize agent service
-    await AgentService.initialize()
+    # Initialize agent service (skip auth validation in production if no credentials)
+    try:
+        await AgentService.initialize()
+    except Exception as e:
+        logger.warning(f"AgentService initialization skipped: {e}")
+        logger.info("Application will start without AI agent features")
     yield
     # Cleanup
-    await AgentService.cleanup()
+    try:
+        await AgentService.cleanup()
+    except:
+        pass
 
 app = FastAPI(
     title="Intune Diagnostics API",
@@ -80,7 +90,8 @@ app.add_middleware(
 
 async def init_db():
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        # Use checkfirst=True to avoid "table already exists" errors on Azure
+        await conn.run_sync(lambda sync_conn: Base.metadata.create_all(sync_conn, checkfirst=True))
 
 # Include routers
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
