@@ -36,8 +36,10 @@ load_dotenv()
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from azure.identity import DefaultAzureCredential
+from pathlib import Path
 
 from models.database import Base
 from routers import auth, settings, diagnostics
@@ -64,10 +66,13 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Get allowed origins from environment variable for production
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001,http://localhost:5173").split(",")
+
 # CORS middleware for frontend communication
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001", "http://localhost:5173"],  # React/Vite dev servers
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -82,6 +87,27 @@ app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 app.include_router(diagnostics.router, prefix="/api/diagnostics", tags=["diagnostics"])
 
+# Mount static files for production (built React app)
+# This serves the frontend from the /static directory
+static_dir = Path(__file__).parent.parent / "frontend" / "dist"
+if static_dir.exists():
+    app.mount("/assets", StaticFiles(directory=str(static_dir / "assets")), name="assets")
+    
+    # Serve index.html for all non-API routes (SPA routing)
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        """Serve React SPA for all non-API routes"""
+        # Skip API routes
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+        
+        # Serve index.html for SPA routing
+        index_file = static_dir / "index.html"
+        if index_file.exists():
+            from fastapi.responses import FileResponse
+            return FileResponse(index_file)
+        raise HTTPException(status_code=404, detail="Frontend not built")
+
 # App-level debug route listing (not in schema docs)
 @app.get("/api/debug/routes", include_in_schema=False)
 async def debug_list_routes():
@@ -93,11 +119,11 @@ async def debug_list_routes():
             info.append(f"{r.path} -> {methods}")
     return sorted(info)
 
-@app.get("/")
+@app.get("/api")
 async def root():
     return {"message": "Intune Diagnostics API is running"}
 
-@app.get("/health")
+@app.get("/api/health")
 async def health_check():
     return {"status": "healthy"}
 
