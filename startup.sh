@@ -12,13 +12,17 @@ echo "Using port: $PORT"
 echo "Current directory: $(pwd)"
 echo "PYTHONPATH: $PYTHONPATH"
 
+# Change to backend directory so relative imports work
+cd backend || { echo "Error: backend directory not found"; exit 1; }
+echo "Changed to directory: $(pwd)"
+
 # Run database migrations if needed
 # python -m alembic upgrade head
 
 # Start the FastAPI application on the port Azure expects
-# Since our structure has backend/main.py, we need to import backend.main:app
+# Use main:app since we're now in the backend directory
 echo "Starting Gunicorn on 0.0.0.0:$PORT"
-exec gunicorn backend.main:app \
+exec gunicorn main:app \
     --workers 4 \
     --worker-class uvicorn.workers.UvicornWorker \
     --bind "0.0.0.0:$PORT" \
