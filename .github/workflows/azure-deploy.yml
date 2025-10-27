@@ -62,6 +62,9 @@ jobs:
           # For Azure App Service ZIP deploy - files must be at root of ZIP, not in a subdirectory
           # Copy everything to a temporary location, then zip from there
           
+          # Create temp directory
+          mkdir -p .deploy_temp
+          
           # Copy backend source
           cp -r backend .deploy_temp/
           
