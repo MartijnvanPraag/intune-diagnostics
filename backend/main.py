@@ -89,9 +89,18 @@ app.add_middleware(
 )
 
 async def init_db():
-    async with engine.begin() as conn:
-        # Use checkfirst=True to avoid "table already exists" errors on Azure
-        await conn.run_sync(lambda sync_conn: Base.metadata.create_all(sync_conn, checkfirst=True))
+    try:
+        async with engine.begin() as conn:
+            # Create tables if they don't exist
+            # Note: checkfirst=True doesn't work reliably with concurrent workers on Azure
+            # So we catch OperationalError for "table already exists"
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception as e:
+        # Ignore "table already exists" errors from concurrent workers
+        if "already exists" not in str(e):
+            logger.error(f"Database initialization error: {e}")
+            raise
+        logger.info("Database tables already exist (expected with multiple workers)")
 
 # Include routers
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
