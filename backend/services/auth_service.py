@@ -1,23 +1,44 @@
 import os
 import time
 from typing import Optional, Dict, Tuple
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider, InteractiveBrowserCredential
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider, InteractiveBrowserCredential, OnBehalfOfCredential, ManagedIdentityCredential
 from azure.core.exceptions import ClientAuthenticationError
+from azure.core.credentials import AccessToken
 import httpx
 import json
 import logging
 
 logger = logging.getLogger(__name__)
 
+# Check if running in Azure App Service
+IS_AZURE_APP_SERVICE = os.getenv("WEBSITE_INSTANCE_ID") is not None
+
+class UserTokenCredential:
+    """
+    Custom credential that uses a user-provided access token.
+    This allows us to use the MSAL token from the frontend for Azure SDK calls.
+    """
+    def __init__(self, access_token: str):
+        self._access_token = access_token
+        # Set expiry to 1 hour from now (typical token lifetime)
+        self._expires_on = int(time.time()) + 3600
+    
+    def get_token(self, *scopes, **kwargs) -> AccessToken:
+        """Return the user's access token as an AccessToken object"""
+        return AccessToken(self._access_token, self._expires_on)
+
 class AuthService:
     """
-    Robust authentication service with lazy credential initialization.
+    Robust authentication service with support for user-provided MSAL tokens.
     
-    Prevents multiple auth prompts by:
-    1. Lazy-loading credentials only when first needed
-    2. Reusing a single credential instance across all services
-    3. Caching tokens with expiry tracking
-    4. Preferring Azure CLI for non-interactive scenarios
+    For web app scenarios (Azure App Service):
+    1. Frontend authenticates user via MSAL and obtains access token
+    2. Frontend passes token to backend with each API call
+    3. Backend uses token directly or exchanges it for service-specific tokens
+    
+    For local development:
+    1. Falls back to DefaultAzureCredential (Azure CLI, VS Code, etc.)
+    2. Supports interactive auth if needed
     """
     
     _token_cache: Dict[str, Tuple[float, str]] = {}
@@ -26,7 +47,17 @@ class AuthService:
         # Lazy-initialized credentials (only create when first used)
         self._credential: Optional[DefaultAzureCredential] = None
         self._wam_credential: Optional[InteractiveBrowserCredential] = None
+        self._managed_identity_credential: Optional[ManagedIdentityCredential] = None
         self._credential_initialized = False
+        
+        # User-provided token for MSAL-based auth (from frontend)
+        self._user_token: Optional[str] = None
+        self._user_token_credential: Optional[UserTokenCredential] = None
+        
+        # Azure AD application credentials for OBO flow (if needed)
+        self.client_id = os.getenv("AZURE_CLIENT_ID", "fbadc585-90b3-48ab-8052-c1fcc32ce3fe")
+        self.tenant_id = os.getenv("AZURE_TENANT_ID", "72f988bf-86f1-41af-91ab-2d7cd011db47")
+        self.client_secret = os.getenv("AZURE_CLIENT_SECRET")  # Only needed for OBO flow
         
         # Use Cognitive Services scope for Azure AI services (not Microsoft Graph)
         self.cognitive_services_scope = "https://cognitiveservices.azure.com/.default"
@@ -36,7 +67,36 @@ class AuthService:
         self._cognitive_token_provider = None
         self._graph_token_provider = None
         
-        logger.info("AuthService initialized - credentials will be created on first use")
+        # Check if running in Azure App Service
+        if IS_AZURE_APP_SERVICE:
+            logger.info("AuthService initialized - running in Azure App Service, will use Managed Identity for AI services")
+        else:
+            logger.info("AuthService initialized - local development mode, supports MSAL token injection and credential fallback")
+    
+    def set_user_token(self, access_token: str):
+        """
+        Set the user's MSAL access token from the frontend.
+        This allows the backend to use the user's authenticated session.
+        
+        Args:
+            access_token: The access token from MSAL (from frontend)
+        """
+        self._user_token = access_token
+        self._user_token_credential = UserTokenCredential(access_token)
+        
+        # Clear token providers to force recreation with new credential
+        self._cognitive_token_provider = None
+        self._graph_token_provider = None
+        
+        logger.info("User token set - will use MSAL token for authentication")
+    
+    def clear_user_token(self):
+        """Clear the user's token and revert to default credentials"""
+        self._user_token = None
+        self._user_token_credential = None
+        self._cognitive_token_provider = None
+        self._graph_token_provider = None
+        logger.info("User token cleared - will use default credentials")
     
     def _ensure_credentials_initialized(self):
         """Lazy initialization of credentials - only called when actually needed"""
@@ -70,15 +130,41 @@ class AuthService:
         logger.info("Azure credentials initialized - using Azure CLI (non-interactive)")
     
     @property
-    def credential(self) -> DefaultAzureCredential:
-        """Lazy-loaded primary credential"""
+    def credential(self):
+        """Return the appropriate credential based on context"""
+        # If running in Azure App Service, use Managed Identity for AI services
+        if IS_AZURE_APP_SERVICE:
+            if self._managed_identity_credential is None:
+                logger.info("Creating Managed Identity credential for Azure App Service")
+                self._managed_identity_credential = ManagedIdentityCredential()
+            return self._managed_identity_credential
+        
+        # If user token is available, use it (for web app scenarios in local dev)
+        if self._user_token_credential is not None:
+            logger.debug("Using user-provided MSAL token")
+            return self._user_token_credential
+        
+        # Otherwise use default credential (for local development)
         self._ensure_credentials_initialized()
         assert self._credential is not None, "Credential should be initialized"
         return self._credential
     
     @property
-    def wam_credential(self) -> InteractiveBrowserCredential:
-        """Lazy-loaded WAM credential (for Azure OpenAI chat client)"""
+    def wam_credential(self):
+        """Return the appropriate credential for interactive scenarios"""
+        # If running in Azure App Service, use Managed Identity
+        if IS_AZURE_APP_SERVICE:
+            if self._managed_identity_credential is None:
+                logger.info("Creating Managed Identity credential for Azure App Service")
+                self._managed_identity_credential = ManagedIdentityCredential()
+            return self._managed_identity_credential
+        
+        # If user token is available, use it
+        if self._user_token_credential is not None:
+            logger.debug("Using user-provided MSAL token for WAM scenarios")
+            return self._user_token_credential
+        
+        # Otherwise create WAM credential for local development
         self._ensure_credentials_initialized()
         
         # Create WAM credential on first access if not exists

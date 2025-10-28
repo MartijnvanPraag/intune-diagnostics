@@ -9,6 +9,7 @@ import logging
 from models.database import User
 from models.schemas import User as UserSchema, UserCreate
 from dependencies import get_db
+from services.auth_service import auth_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ ISSUER_V1 = f"https://sts.windows.net/{TENANT_ID}/"
 jwks_client = PyJWKClient(JWKS_URI, cache_keys=True, lifespan=86400)
 
 
-async def verify_token(authorization: Optional[str] = Header(None)) -> dict:
+async def verify_token(authorization: Optional[str] = Header(None)) -> tuple[dict, str]:
     """
     Verify JWT token from Authorization header
     
@@ -39,7 +40,7 @@ async def verify_token(authorization: Optional[str] = Header(None)) -> dict:
     3. Audience (ensures token is for our app)
     4. Issuer (ensures token is from Azure AD)
     
-    Returns decoded token claims if valid, raises HTTPException if invalid
+    Returns tuple of (decoded token claims, raw token string) if valid, raises HTTPException if invalid
     """
     if not authorization:
         raise HTTPException(
@@ -113,7 +114,7 @@ async def verify_token(authorization: Optional[str] = Header(None)) -> dict:
             raise HTTPException(status_code=401, detail=error_msg)
         
         logger.info(f"Token validated for user: {payload.get('preferred_username', 'unknown')}")
-        return payload
+        return payload, token  # Return both payload and raw token
         
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token has expired")
@@ -130,15 +131,22 @@ async def verify_token(authorization: Optional[str] = Header(None)) -> dict:
 async def register_user(
     user_data: UserCreate,
     db: AsyncSession = Depends(get_db),
-    token_payload: dict = Depends(verify_token)
+    token_data: tuple = Depends(verify_token)
 ):
     """
     Register or update user in database
     
     This endpoint is called after successful MSAL authentication.
     The JWT token is validated to ensure the user is authenticated.
+    The user's access token is stored in auth_service for AI service calls.
     """
+    token_payload, raw_token = token_data
+    
     try:
+        # Store the user's access token in auth_service for AI service authentication
+        auth_service.set_user_token(raw_token)
+        logger.info("User token stored in auth_service for AI service authentication")
+        
         # Verify the user data matches the token claims (security check)
         token_user_id = token_payload.get("oid") or token_payload.get("sub")
         if user_data.azure_user_id != token_user_id:
@@ -211,13 +219,19 @@ async def logout():
 @router.get("/me", response_model=UserSchema)
 async def get_current_user(
     db: AsyncSession = Depends(get_db),
-    token_payload: dict = Depends(verify_token)
+    token_data: tuple = Depends(verify_token)
 ):
     """
     Get current authenticated user from database
     
     Requires valid JWT token in Authorization header.
+    Also refreshes the user's token in auth_service.
     """
+    token_payload, raw_token = token_data
+    
+    # Refresh the user's access token in auth_service
+    auth_service.set_user_token(raw_token)
+    
     # Extract user ID from token
     azure_user_id = token_payload.get("oid") or token_payload.get("sub")
     
