@@ -289,7 +289,15 @@ class AgentService:
         # Proactively validate authentication for cognitive services to catch stale tokens early
         await agent_service._validate_authentication()
         
-        # Eagerly spin up MCP server so auth is handled once at startup
+        # Skip eager MCP initialization in Azure App Service (Node.js not available)
+        # MCP will be lazy-initialized on first use if needed
+        IS_AZURE_APP_SERVICE = os.getenv("WEBSITE_INSTANCE_ID") is not None
+        if IS_AZURE_APP_SERVICE:
+            logger.info("Running in Azure App Service - skipping eager MCP initialization (will lazy-init if needed)")
+            logger.info("Note: Kusto MCP server requires Node.js. Install Node.js or use Python Kusto SDK for Azure deployment.")
+            return
+        
+        # Eagerly spin up MCP server so auth is handled once at startup (local development only)
         try:
             from services.kusto_mcp_service import get_kusto_service
             kusto_service = await get_kusto_service()
