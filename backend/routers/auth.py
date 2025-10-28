@@ -14,7 +14,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # Azure AD JWT validation configuration
-TENANT_ID = "common"  # Use "common" for multi-tenant, or your specific tenant ID
+TENANT_ID = "72f988bf-86f1-41af-91ab-2d7cd011db47"  # Microsoft tenant (single-tenant app)
 CLIENT_ID = "fbadc585-90b3-48ab-8052-c1fcc32ce3fe"  # Your Entra App ID
 JWKS_URI = f"https://login.microsoftonline.com/{TENANT_ID}/discovery/v2.0/keys"
 ISSUER = f"https://login.microsoftonline.com/{TENANT_ID}/v2.0"

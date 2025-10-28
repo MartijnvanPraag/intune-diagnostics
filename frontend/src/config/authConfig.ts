@@ -11,7 +11,7 @@ import { Configuration, PopupRequest } from "@azure/msal-browser";
 export const msalConfig: Configuration = {
   auth: {
     clientId: "fbadc585-90b3-48ab-8052-c1fcc32ce3fe", // Your Entra App ID
-    authority: "https://login.microsoftonline.com/common", // Multi-tenant (change to your tenant ID if single-tenant)
+    authority: "https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47", // Microsoft tenant (single-tenant)
     redirectUri: window.location.origin, // Automatically uses current origin
     postLogoutRedirectUri: window.location.origin,
   },
