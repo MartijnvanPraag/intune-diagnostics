@@ -12,17 +12,6 @@ export interface User {
   updated_at: string
 }
 
-export interface LoginResponse {
-  status: string
-  message: string
-  user: {
-    azure_user_id: string
-    email: string
-    display_name: string
-  }
-  access_token?: string
-}
-
 export interface UserCreate {
   azure_user_id: string
   email: string
@@ -30,25 +19,36 @@ export interface UserCreate {
 }
 
 class AuthService {
-  async login(): Promise<LoginResponse> {
-    const response = await axios.post(`${API_BASE_URL}/auth/login`)
+  /**
+   * Register or update user in backend database
+   * This is called after MSAL authentication succeeds
+   * 
+   * @param userData - User information from Azure AD token
+   * @param accessToken - JWT token from MSAL (sent as Bearer token)
+   */
+  async registerUser(userData: UserCreate, accessToken?: string): Promise<User> {
+    const response = await axios.post(`${API_BASE_URL}/auth/register`, userData, {
+      headers: accessToken ? {
+        Authorization: `Bearer ${accessToken}`,
+      } : undefined,
+    })
     return response.data
   }
 
+  /**
+   * Logout from backend (optional - mainly for clearing server-side cache)
+   */
   async logout(): Promise<void> {
     try {
       await axios.post(`${API_BASE_URL}/auth/logout`)
     } catch (error) {
-      // Continue with logout even if backend call fails
       console.warn('Backend logout failed, continuing with local logout:', error)
     }
   }
 
-  async registerUser(userData: UserCreate): Promise<User> {
-    const response = await axios.post(`${API_BASE_URL}/auth/register`, userData)
-    return response.data
-  }
-
+  /**
+   * Get current user from backend
+   */
   async getCurrentUser(azureUserId: string): Promise<User> {
     const response = await axios.get(`${API_BASE_URL}/auth/me`, {
       params: { azure_user_id: azureUserId }

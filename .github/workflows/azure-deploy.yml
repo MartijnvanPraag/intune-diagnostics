@@ -80,8 +80,9 @@ jobs:
           # Copy Python requirements (Oryx will use this)
           cp requirements.txt .deploy_temp/
           
-          # Copy instructions.md (required by scenario_lookup_service)
-          cp instructions.md .deploy_temp/
+          # Copy placeholder instructions.md (will be replaced by admin interface)
+          # This allows the app to start without the full instructions
+          cp instructions_placeholder.md .deploy_temp/instructions.md
           
           # Copy startup script to root (where Oryx expects it)
           cp startup.sh .deploy_temp/

@@ -73,3 +73,8 @@ logs/
 # Test and debug scripts
 test*
 debug*
+
+# Instructions (use placeholder instead)
+instructions.md
+instructions.md.backup
+!instructions_placeholder.md
