@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      # Azure AD / Entra Configuration
+      - AZURE_CLIENT_ID=fbadc585-90b3-48ab-8052-c1fcc32ce3fe
+      - AZURE_TENANT_ID=72f988bf-86f1-41af-91ab-2d7cd011db47
+      
+      # Azure OpenAI Configuration
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}
+      - AZURE_OPENAI_API_VERSION=2024-08-01-preview
+      - AZURE_OPENAI_DEPLOYMENT=${AZURE_OPENAI_DEPLOYMENT}
+      - AZURE_OPENAI_EMBEDDING_DEPLOYMENT=${AZURE_OPENAI_EMBEDDING_DEPLOYMENT}
+      
+      # Database
+      - DATABASE_URL=sqlite+aiosqlite:///./backend/intune_diagnostics.db
+      
+      # Application
+      - PORT=8000
+      - ENVIRONMENT=development
+    
+    volumes:
+      # Mount local database for persistence during development
+      - ./backend/intune_diagnostics.db:/app/backend/intune_diagnostics.db
+      
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    restart: unless-stopped

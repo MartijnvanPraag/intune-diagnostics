@@ -1,0 +1,79 @@
+# Git and version control
+.git
+.gitignore
+.github
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+.npm/
+
+# Frontend build (we build inside Docker)
+frontend/dist/
+frontend/.vite/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Environment files (use Azure App Settings instead)
+.env
+.env.local
+.env.*.local
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Test files
+test_*.py
+tests/
+scripts/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Claude artifacts
+.claude/
+
+# Backup files
+*.backup
+*_backup.*
+
+# Azure deployment artifacts
+AZURE_DEPLOYMENT.md
+DEPLOYMENT_SUMMARY.md
+README_DEPLOYMENT.md
+build.sh
+startup.sh
+instructions.md
+instructions.md.backup
+instructions_placeholder.md
