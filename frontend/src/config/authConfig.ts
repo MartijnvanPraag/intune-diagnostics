@@ -45,16 +45,24 @@ export const msalConfig: Configuration = {
 
 /**
  * Scopes for login request
- * These are the permissions your app needs from Microsoft Graph
+ * Request token for OUR app's API (not Microsoft Graph)
+ * Using GUID-based identifier (required for /.default with app identifier)
  */
 export const loginRequest: PopupRequest = {
   scopes: [
-    "User.Read", // Read user profile
-    "openid",    // Required for OIDC
-    "profile",   // Get user name
-    "email",     // Get user email
+    `fbadc585-90b3-48ab-8052-c1fcc32ce3fe/.default`, // GUID-based app identifier
   ],
 };
+
+/**
+ * Alternative: Request user impersonation scope if you exposed it
+ * Uncomment this if you created a custom scope in Entra "Expose an API"
+ */
+// export const loginRequest: PopupRequest = {
+//   scopes: [
+//     `api://fbadc585-90b3-48ab-8052-c1fcc32ce3fe/user_impersonation`,
+//   ],
+// };
 
 /**
  * Scopes for accessing your backend API

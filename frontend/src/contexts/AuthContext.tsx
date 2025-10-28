@@ -85,8 +85,9 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       setUser(backendUser)
     } catch (error) {
       console.error('Failed to sync user with backend:', error)
-      // If token acquisition fails, user needs to sign in again
-      await instance.logoutPopup()
+      // Don't force logout - just log the error and let user try again
+      // The token might be valid but backend might be unreachable
+      setUser(null)
     } finally {
       setIsLoading(false)
     }

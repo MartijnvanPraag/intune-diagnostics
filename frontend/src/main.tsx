@@ -11,7 +11,14 @@ import './index.css'
 const msalInstance = new PublicClientApplication(msalConfig)
 
 // Handle redirect promise (required for redirect flow)
-msalInstance.initialize().then(() => {
+msalInstance.initialize().then(async () => {
+  // Handle any pending redirect operations
+  try {
+    await msalInstance.handleRedirectPromise()
+  } catch (error) {
+    console.error('Error handling redirect:', error)
+  }
+  
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
       <MsalProvider instance={msalInstance}>

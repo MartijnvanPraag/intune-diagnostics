@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Clear MSAL Cache</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        button {
+            background: #0078d4;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px 5px;
+        }
+        button:hover {
+            background: #106ebe;
+        }
+        .danger {
+            background: #d13438;
+        }
+        .danger:hover {
+            background: #a80000;
+        }
+        pre {
+            background: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .success {
+            background: #dff6dd;
+            color: #107c10;
+        }
+        .info {
+            background: #e3f2fd;
+            color: #0078d4;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔧 MSAL Cache Cleanup Tool</h1>
+        <p>Use this page to clear your MSAL authentication cache and start fresh.</p>
+        
+        <h2>Current Cache Status:</h2>
+        <div id="cacheInfo"></div>
+        
+        <h2>Actions:</h2>
+        <button onclick="showCache()">Show MSAL Cache</button>
+        <button onclick="clearMSAL()">Clear MSAL Cache Only</button>
+        <button class="danger" onclick="clearAll()">Clear ALL LocalStorage</button>
+        
+        <div id="result"></div>
+        
+        <h2>Instructions:</h2>
+        <ol>
+            <li>Click "Clear MSAL Cache Only" or "Clear ALL LocalStorage"</li>
+            <li>Go back to <a href="/">http://localhost:5173</a></li>
+            <li>Try signing in again</li>
+        </ol>
+    </div>
+
+    <script>
+        function updateCacheInfo() {
+            const msalKeys = Object.keys(localStorage).filter(k => k.includes('msal'));
+            const totalKeys = Object.keys(localStorage).length;
+            
+            const info = document.getElementById('cacheInfo');
+            info.innerHTML = `
+                <div class="result info">
+                    <strong>Total localStorage keys:</strong> ${totalKeys}<br>
+                    <strong>MSAL-related keys:</strong> ${msalKeys.length}
+                </div>
+            `;
+        }
+
+        function showCache() {
+            const msalKeys = Object.keys(localStorage).filter(k => k.includes('msal'));
+            const result = document.getElementById('result');
+            
+            if (msalKeys.length === 0) {
+                result.innerHTML = '<div class="result success">No MSAL cache found!</div>';
+                return;
+            }
+            
+            let html = '<div class="result info"><strong>MSAL Cache Keys:</strong><pre>';
+            msalKeys.forEach(key => {
+                html += key + '\n';
+            });
+            html += '</pre></div>';
+            result.innerHTML = html;
+        }
+
+        function clearMSAL() {
+            const msalKeys = Object.keys(localStorage).filter(k => 
+                k.includes('msal') || 
+                k.includes('login.windows.net') ||
+                k.includes('login.microsoftonline.com')
+            );
+            
+            const count = msalKeys.length;
+            msalKeys.forEach(key => localStorage.removeItem(key));
+            
+            const result = document.getElementById('result');
+            result.innerHTML = `
+                <div class="result success">
+                    ✅ Cleared ${count} MSAL cache entries!<br>
+                    <strong>Next step:</strong> Go to <a href="/">http://localhost:5173</a> and sign in again.
+                </div>
+            `;
+            updateCacheInfo();
+        }
+
+        function clearAll() {
+            const count = Object.keys(localStorage).length;
+            localStorage.clear();
+            
+            const result = document.getElementById('result');
+            result.innerHTML = `
+                <div class="result success">
+                    ✅ Cleared ALL ${count} localStorage entries!<br>
+                    <strong>Next step:</strong> Go to <a href="/">http://localhost:5173</a> and sign in again.
+                </div>
+            `;
+            updateCacheInfo();
+        }
+
+        // Update on load
+        updateCacheInfo();
+    </script>
+</body>
+</html>

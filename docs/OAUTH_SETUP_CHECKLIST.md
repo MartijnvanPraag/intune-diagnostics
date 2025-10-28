@@ -118,6 +118,9 @@ Backend should extract these claims:
 
 ## 🚨 Troubleshooting
 
+### Issue: "AADSTS50194: Application is not configured as a multi-tenant application"
+**Fix**: Your app is single-tenant. The configuration has been updated to use your tenant-specific endpoint instead of `/common`. No action needed.
+
 ### Issue: "AADSTS50011: Redirect URI mismatch"
 **Fix**: Add exact redirect URI to Entra App → Authentication → Redirect URIs
 
