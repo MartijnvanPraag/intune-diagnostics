@@ -244,3 +244,38 @@ async def get_current_user(
         raise HTTPException(status_code=404, detail="User not found")
     
     return user
+
+
+@router.post("/set-cognitive-token")
+async def set_cognitive_services_token(
+    request: dict,
+    token_data: tuple = Depends(verify_token)
+):
+    """
+    Accept and store a Cognitive Services access token from the frontend.
+    This allows the backend to use the user's Cognitive Services token for AI calls.
+    
+    Request body:
+    {
+        "cognitive_token": "eyJ0eXAiOiJKV1QiLCJh..."
+    }
+    """
+    try:
+        cognitive_token = request.get("cognitive_token")
+        if not cognitive_token:
+            raise HTTPException(status_code=400, detail="cognitive_token is required")
+        
+        # Store the Cognitive Services token in auth_service
+        auth_service.set_cognitive_services_token(cognitive_token)
+        logger.info("Cognitive Services token stored successfully")
+        
+        return {
+            "status": "success",
+            "message": "Cognitive Services token stored successfully"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to store Cognitive Services token: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to store token: {str(e)}")

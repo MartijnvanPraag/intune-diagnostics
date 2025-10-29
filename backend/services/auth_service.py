@@ -54,6 +54,9 @@ class AuthService:
         self._user_token: Optional[str] = None
         self._user_token_credential: Optional[UserTokenCredential] = None
         
+        # Cognitive Services token specifically (if provided separately)
+        self._cognitive_services_token_credential: Optional[UserTokenCredential] = None
+        
         # Azure AD application credentials for OBO flow (if needed)
         self.client_id = os.getenv("AZURE_CLIENT_ID", "fbadc585-90b3-48ab-8052-c1fcc32ce3fe")
         self.tenant_id = os.getenv("AZURE_TENANT_ID", "72f988bf-86f1-41af-91ab-2d7cd011db47")
@@ -89,6 +92,22 @@ class AuthService:
         self._graph_token_provider = None
         
         logger.info("User token set - will use MSAL token for authentication")
+    
+    def set_cognitive_services_token(self, cognitive_token: str):
+        """
+        Set a specific Cognitive Services access token from the frontend.
+        This allows the backend to use the user's Cognitive Services token for AI calls.
+        
+        Args:
+            cognitive_token: The Cognitive Services access token from MSAL (from frontend)
+        """
+        # Create a credential wrapper for the Cognitive Services token
+        self._cognitive_services_token_credential = UserTokenCredential(cognitive_token)
+        
+        # Clear cognitive token provider to force recreation with new token
+        self._cognitive_token_provider = None
+        
+        logger.info("Cognitive Services token set - will use for AI service calls")
     
     def clear_user_token(self):
         """Clear the user's token and revert to default credentials"""
@@ -151,20 +170,27 @@ class AuthService:
     
     @property
     def wam_credential(self):
-        """Return the appropriate credential for interactive scenarios"""
-        # If running in Azure App Service, use Managed Identity
+        """Return the appropriate credential for Azure OpenAI (prioritizes user's MSAL token)"""
+        # CRITICAL: Prefer Cognitive Services token if explicitly provided
+        if self._cognitive_services_token_credential is not None:
+            logger.debug("Using user-provided Cognitive Services token for Azure OpenAI")
+            return self._cognitive_services_token_credential
+        
+        # CRITICAL: Always prefer user's MSAL token if available
+        # This ensures we use the correct tenant (user's tenant) instead of trying to authenticate
+        # with a different tenant via Managed Identity or InteractiveBrowserCredential
+        if self._user_token_credential is not None:
+            logger.debug("Using user-provided MSAL token for Azure OpenAI (avoids tenant mismatch)")
+            return self._user_token_credential
+        
+        # If running in Azure App Service, use Managed Identity (only when no user token)
         if IS_AZURE_APP_SERVICE:
             if self._managed_identity_credential is None:
                 logger.info("Creating Managed Identity credential for Azure App Service")
                 self._managed_identity_credential = ManagedIdentityCredential()
             return self._managed_identity_credential
         
-        # If user token is available, use it
-        if self._user_token_credential is not None:
-            logger.debug("Using user-provided MSAL token for WAM scenarios")
-            return self._user_token_credential
-        
-        # Otherwise create WAM credential for local development
+        # Otherwise create WAM credential for local development (when no user token and not in Azure)
         self._ensure_credentials_initialized()
         
         # Create WAM credential on first access if not exists

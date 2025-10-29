@@ -45,13 +45,12 @@ export const msalConfig: Configuration = {
 
 /**
  * Scopes for login request
- * Request token for OUR app's API (not Microsoft Graph)
- * Using GUID-based identifier (required for /.default with app identifier)
+ * 
+ * Request a token for THIS app using the client ID directly.
+ * This ensures the token audience (aud) matches what the backend expects.
  */
 export const loginRequest: PopupRequest = {
-  scopes: [
-    `fbadc585-90b3-48ab-8052-c1fcc32ce3fe/.default`, // GUID-based app identifier
-  ],
+  scopes: [`${msalConfig.auth.clientId}/.default`],
 };
 
 /**

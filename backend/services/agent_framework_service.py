@@ -13,6 +13,7 @@ Migration Notes:
 
 import json
 import logging
+import os
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeAlias
