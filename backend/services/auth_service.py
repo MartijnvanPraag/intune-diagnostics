@@ -31,6 +31,7 @@ class AuthService:
         # Use Cognitive Services scope for Azure AI services (not Microsoft Graph)
         self.cognitive_services_scope = "https://cognitiveservices.azure.com/.default"
         self.graph_scope = "https://graph.microsoft.com/.default"
+        self.intune_api_scope = "https://api.manage.microsoft.com/.default"
         
         # Token providers will be created lazily
         self._cognitive_token_provider = None
@@ -178,6 +179,10 @@ class AuthService:
     async def get_graph_token(self) -> str:
         """Get access token specifically for Microsoft Graph"""
         return await self.get_access_token(self.graph_scope)
+    
+    async def get_intune_datawarehouse_token(self) -> str:
+        """Get access token specifically for Intune Data Warehouse API"""
+        return await self.get_access_token(self.intune_api_scope)
     
     async def get_user_info(self, access_token: Optional[str] = None) -> dict:
         """Get user information from Microsoft Graph"""

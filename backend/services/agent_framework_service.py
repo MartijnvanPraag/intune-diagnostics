@@ -25,7 +25,6 @@ from agent_framework import (
     MagenticAgentDeltaEvent,
     MagenticAgentMessageEvent,
     MagenticBuilder,
-    MagenticCallbackMode,
     MagenticFinalResultEvent,
     MagenticOrchestratorMessageEvent,
     WorkflowOutputEvent,
@@ -326,7 +325,16 @@ def create_instructions_mcp_tool_function(tool_name: str, tool_description: str)
                     if isinstance(placeholder_values, dict):
                         normalized: dict[str, Any] = {}
                         for key, val in placeholder_values.items():
-                            normalized[key] = _normalize_placeholder_value(key, val)
+                            # Special handling for list placeholders (PolicyIdList, GroupIdList, etc.)
+                            # Convert comma-separated GUIDs to quoted KQL format
+                            if key.endswith('List') and isinstance(val, str) and ',' in val:
+                                # Remove any existing quotes and spaces, then reformat
+                                clean_values = [v.strip().strip("'\"") for v in val.split(',')]
+                                formatted_val = ', '.join(f"'{v}'" for v in clean_values if v)
+                                normalized[key] = formatted_val
+                                logger.debug(f"[AgentFramework] Formatted {key} for KQL: {formatted_val[:100]}...")
+                            else:
+                                normalized[key] = _normalize_placeholder_value(key, val)
                         actual_args = {**actual_args, 'placeholder_values': normalized}
                         logger.debug(f"[AgentFramework] Normalized placeholder values for {tool_name}: {normalized}")
 
@@ -364,6 +372,72 @@ def create_instructions_mcp_tool_function(tool_name: str, tool_description: str)
     instructions_mcp_tool_func.__doc__ = tool_description
     
     return instructions_mcp_tool_func
+
+
+def create_datawarehouse_mcp_tool_function(tool_name: str, tool_description: str) -> Callable[..., Awaitable[str]]:
+    """Create an async function wrapper for a Data Warehouse MCP tool
+    
+    Similar to create_mcp_tool_function but for the Data Warehouse MCP server.
+    These tools provide OData-based access to Intune historical data (24-hour snapshots).
+    """
+    
+    async def datawarehouse_mcp_tool_func(**kwargs: Any) -> str:
+        """Execute Data Warehouse MCP tool.
+        
+        Args:
+            **kwargs: Tool-specific parameters
+            
+        Returns:
+            Result from the Data Warehouse MCP tool execution
+        """
+        try:
+            from services.datawarehouse_mcp_service import get_datawarehouse_service
+            
+            datawarehouse_service = await get_datawarehouse_service()
+            
+            # Handle nested kwargs structure from agent calls
+            if "kwargs" in kwargs and isinstance(kwargs["kwargs"], dict):
+                actual_args = kwargs["kwargs"]
+            else:
+                actual_args = kwargs
+            
+            logger.info(f"[AgentFramework] Calling Data Warehouse MCP tool '{tool_name}' with args: {actual_args}")
+            
+            if hasattr(datawarehouse_service, '_session') and datawarehouse_service._session:
+                result = await datawarehouse_service._session.call_tool(tool_name, actual_args)
+                
+                # Properly serialize the result
+                if hasattr(result, 'content'):
+                    content = result.content
+                    if isinstance(content, list) and content:
+                        # Handle TextContent objects
+                        text_content = content[0]
+                        text_attr = getattr(text_content, 'text', None)
+                        if text_attr is not None:
+                            result_text = str(text_attr)
+                            # Log the response for debugging
+                            if len(result_text) <= 500:
+                                logger.info(f"[AgentFramework] Data Warehouse MCP tool '{tool_name}' returned: {result_text}")
+                            else:
+                                logger.info(f"[AgentFramework] Data Warehouse MCP tool '{tool_name}' returned {len(result_text)} chars: {result_text[:500]}...")
+                            return result_text
+                        else:
+                            return json.dumps({"content": str(text_content)})
+                    return json.dumps({"content": "No content returned"})
+                else:
+                    return json.dumps({"result": str(result)})
+            else:
+                return json.dumps({"success": False, "error": "Data Warehouse MCP session not available"})
+                
+        except Exception as e:
+            logger.error(f"Data Warehouse MCP tool {tool_name} execution failed: {e}")
+            return json.dumps({"success": False, "error": str(e)})
+    
+    # Set function metadata for proper tool registration
+    datawarehouse_mcp_tool_func.__name__ = tool_name
+    datawarehouse_mcp_tool_func.__doc__ = tool_description
+    
+    return datawarehouse_mcp_tool_func
 
 
 class AgentFrameworkService:
@@ -618,8 +692,11 @@ class AgentFrameworkService:
         
         Tool Priority:
         1. Instructions MCP tools (scenario management)
-        2. Kusto MCP execute_query only (query execution)
-        3. lookup_context (conversation state)
+        2. Data Warehouse MCP tools (historical device/user data via OData API)
+           - 4 MCP tools: list_entities, get_entity_schema, query_entity, execute_odata_query
+           - 1 helper: find_device_by_id (client-side filtering workaround for API limitations)
+        3. Kusto MCP execute_query only (real-time event query execution)
+        4. lookup_context (conversation state)
         """
         tools: list[Callable[..., Awaitable[str]]] = []
         
@@ -653,7 +730,69 @@ class AgentFrameworkService:
         except Exception as e:
             logger.error(f"Failed to load Instructions MCP tools: {e}")
         
-        # Secondary: Kusto MCP for query execution only
+        # Secondary: Data Warehouse MCP tools (historical baseline data)
+        try:
+            from services.datawarehouse_mcp_service import get_datawarehouse_service
+            datawarehouse_service = await get_datawarehouse_service()
+            
+            if hasattr(datawarehouse_service, '_session') and datawarehouse_service._session:
+                dw_tool_list = await datawarehouse_service._session.list_tools()
+                dw_tools = getattr(dw_tool_list, "tools", [])
+                
+                # Add all Data Warehouse MCP tools
+                for tool in dw_tools:
+                    tool_name = getattr(tool, "name", "unknown")
+                    tool_desc = getattr(tool, "description", "No description")
+                    tool_func = create_datawarehouse_mcp_tool_function(tool_name, tool_desc)
+                    tools.append(tool_func)
+                    logger.info(f"Added Data Warehouse MCP tool: {tool_name}")
+                
+                # Add helper method: find_device_by_id (client-side filtering workaround)
+                async def find_device_by_id(device_id: str, max_results: int = 100) -> str:
+                    """
+                    Find a device by deviceId using client-side filtering.
+                    
+                    This is a workaround for the Data Warehouse API limitation where $filter parameter
+                    causes HTTP 400 errors. Fetches devices and filters client-side.
+                    
+                    Args:
+                        device_id: The device GUID to search for
+                        max_results: Maximum devices to search (default: 100)
+                        
+                    Returns:
+                        JSON string with device data if found, or error if not found
+                    """
+                    try:
+                        result = await datawarehouse_service.find_device_by_id(device_id, max_results)
+                        
+                        if result.get("success") and result.get("data", {}).get("found"):
+                            device = result["data"]["device"]
+                            return json.dumps({
+                                "success": True,
+                                "device": device,
+                                "message": f"Found device: {device.get('deviceName', 'Unknown')}"
+                            }, indent=2)
+                        elif result.get("success"):
+                            searched = result.get("data", {}).get("searched", 0)
+                            return json.dumps({
+                                "success": False,
+                                "error": f"Device {device_id} not found in first {searched} devices",
+                                "suggestion": "Try increasing max_results or verify device ID is correct"
+                            }, indent=2)
+                        else:
+                            return json.dumps(result, indent=2)
+                    except Exception as e:
+                        logger.error(f"find_device_by_id failed: {e}")
+                        return json.dumps({"success": False, "error": str(e)})
+                
+                tools.append(find_device_by_id)
+                logger.info(f"Added Data Warehouse helper tool: find_device_by_id")
+            else:
+                logger.warning("Data Warehouse MCP session not available")
+        except Exception as e:
+            logger.error(f"Failed to load Data Warehouse MCP tools: {e}")
+        
+        # Tertiary: Kusto MCP for query execution only (real-time events)
         try:
             from services.kusto_mcp_service import get_kusto_service
             kusto_service = await get_kusto_service()
@@ -691,32 +830,83 @@ class AgentFrameworkService:
         # SIMPLIFIED system instructions - focus on workflow, not anti-patterns
         system_instructions = """You are an Intune Expert assistant specializing in Microsoft Intune diagnostics.
 
-Your primary role is to execute Kusto queries to retrieve and analyze Intune device information.
+Your primary role is to execute queries to retrieve and analyze Intune device information using two data sources:
+1. Data Warehouse API - For historical baseline data (devices, users, apps, policies) updated daily
+2. Kusto queries - For real-time event data and telemetry
 
 WORKFLOW:
 1. Use search_scenarios(query) to find relevant scenarios
 2. Use get_scenario(slug) to get scenario details with steps
 3. For each step in order:
-   - Use substitute_and_get_query(query_id, placeholder_values) to get the query
-     (This automatically validates placeholders - no separate validation needed)
-   - Use execute_query(query) to run it
+   - If step uses Data Warehouse: Use query_entity() with appropriate filters
+   - If step uses Kusto: Use substitute_and_get_query() then execute_query()
 4. Format results as tables and provide summary
 
+DATA SOURCE SELECTION:
+- Use Data Warehouse API for:
+  * Device baseline information (deviceId, deviceName, manufacturer, model, OS version)
+  * User information (userId, userPrincipalName, displayName)
+  * App installation status
+  * Policy compliance status
+  * Historical snapshots (data refreshed daily at Midnight UTC)
+  
+- Use Kusto (execute_query) for:
+  * Real-time events and telemetry
+  * Event sequences and timelines
+  * Complex joins and aggregations
+  * Custom diagnostic queries
+
+⚠️ DATA WAREHOUSE API LIMITATIONS:
+The Data Warehouse API does NOT support $filter or $select OData parameters - both cause HTTP 400 errors.
+Instead:
+- To find a specific device: Use find_device_by_id(device_id) - NOT query_entity with filter
+- To get all devices: Use query_entity(entity="devices") without filter/select parameters
+- The API returns all 39 fields per device - you cannot select specific columns
+- Client-side filtering is the only reliable method for single-device lookups
+
 AVAILABLE TOOLS:
+Scenario Management:
 - search_scenarios: Find scenarios matching keywords
 - get_scenario: Get full scenario definition  
 - get_query: Get raw query text for a specific query_id
 - substitute_and_get_query: Get executable query with placeholders filled and validated
-- execute_query: Run Kusto query
+
+Data Warehouse API (Historical Data):
+- list_entities: List all available Data Warehouse entities
+- get_entity_schema: Get schema/properties for an entity
+- query_entity: Query entity WITHOUT filters (⚠️ $filter and $select cause HTTP 400)
+- execute_odata_query: Execute raw OData query URL (advanced use only)
+- find_device_by_id: Find a specific device by ID (RECOMMENDED for single device lookups)
+
+Kusto (Real-time Data):
+- execute_query: Run Kusto query (use ONLY with queries from substitute_and_get_query)
+
+Context:
 - lookup_context: Get stored values from previous queries
 
 CRITICAL RULES:
 1. Execute scenarios step by step in sequential order (1, 2, 3, ...)
-2. Use exact queries from substitute_and_get_query - never modify them
-3. Don't write your own Kusto queries
-4. substitute_and_get_query validates automatically - don't call separate validation
-5. After completing all steps, format results and stop
-6. Present results as formatted markdown tables
+2. For Kusto steps: ALWAYS call substitute_and_get_query AND execute_query - both required
+3. Getting a query with substitute_and_get_query is NOT execution - you must call execute_query next
+4. For Data Warehouse device lookups: ALWAYS use find_device_by_id(device_id) - NEVER query_entity with filter
+5. For Data Warehouse bulk queries: Use query_entity(entity) without $filter or $select parameters
+6. NEVER pass filter= or select= parameters to query_entity - they cause HTTP 400 errors
+7. Don't write your own Kusto queries - use exact queries from substitute_and_get_query
+8. substitute_and_get_query validates automatically - don't call separate validation
+9. After completing ALL steps (every execute_query call), format results and provide summary
+10. Present results as formatted markdown tables
+
+⚠️ SCENARIO COMPLETION SIGNAL (MANDATORY):
+When you have completed ALL steps in a scenario and provided the summary:
+- End your response with the exact marker: **[SCENARIO_COMPLETE]**
+- This marker MUST appear on its own line at the very end of your response
+- Do NOT add this marker until ALL steps are executed and results are formatted
+- The orchestrator uses this marker to detect completion and stop the workflow
+- Example:
+  
+  (... tables and summary here ...)
+  
+  **[SCENARIO_COMPLETE]**
 
 PLACEHOLDER HANDLING:
 - Always use PascalCase: DeviceId, StartTime, EndTime, EffectiveGroupIdList
@@ -724,14 +914,24 @@ PLACEHOLDER HANDLING:
 - Pass all placeholders to substitute_and_get_query as a dictionary
 - If substitute_and_get_query returns validation errors, fix the values and retry
 
-EXAMPLE WORKFLOW:
+EXAMPLE WORKFLOW (Data Warehouse + Kusto):
 1. search_scenarios(query="device timeline") → Get slug
-2. get_scenario(slug="device-timeline") → Get steps array
-3. For each step:
-   - substitute_and_get_query(query_id="device-timeline_step1", placeholder_values={"DeviceId": "abc"})
-     → Returns validated query with placeholders filled
-   - execute_query(query="SELECT ...") with the returned query_text
-4. Format all results and provide summary
+2. get_scenario(slug="device-timeline") → Get steps array (returns 5 steps)
+3. Step 1 (Data Warehouse - Device Baseline):
+   - find_device_by_id(device_id="abc123") → Returns device with all 39 fields
+4. Step 2 (Kusto - Events):
+   - substitute_and_get_query(query_id="device-timeline_step2", placeholder_values={"DeviceId": "abc123"})
+   - execute_query(query="<returned query>") ← REQUIRED - don't skip this
+5. Step 3 (Kusto - Events):
+   - substitute_and_get_query(query_id="device-timeline_step3", placeholder_values={"DeviceId": "abc123"})
+   - execute_query(query="<returned query>") ← REQUIRED - don't skip this
+6. Step 4 (Kusto - Events):
+   - substitute_and_get_query(query_id="device-timeline_step4", placeholder_values={"DeviceId": "abc123"})
+   - execute_query(query="<returned query>") ← REQUIRED - don't skip this
+7. Step 5 (Kusto - Events):
+   - substitute_and_get_query(query_id="device-timeline_step5", placeholder_values={"PolicyIdList": "..."})
+   - execute_query(query="<returned query>") ← REQUIRED - don't skip this
+8. After ALL execute_query calls complete, format all results and provide summary
 """
         
         # Discover and create tools from MCP server
@@ -1072,17 +1272,72 @@ EXAMPLE WORKFLOW:
             # This is equivalent to Autogen's MagenticOneGroupChat
             logger.info("Building Magentic workflow with IntuneExpert agent...")
             
+            # Custom progress ledger prompt that checks for scenario completion marker
+            custom_progress_prompt = """Recall we are working on the following request:
+{task}
+
+And we have assembled the following team:
+{team}
+
+To make progress on the request, please answer the following questions, including necessary reasoning:
+
+- Is the request fully satisfied? 
+  * Check if the agent's last response contains the marker **[SCENARIO_COMPLETE]**
+  * If the marker is present, the request IS satisfied (answer True)
+  * If the marker is NOT present but the agent has executed all scenario steps and provided results, the request may still be satisfied
+  * If work is still in progress or no results have been provided, answer False
+
+- Are we in a loop where we are repeating the same requests and/or getting the same responses?
+  * Check if search_scenarios or get_scenario was called multiple times
+  * Check if the same steps are being executed repeatedly
+  * If yes, answer True
+
+- Are we making forward progress?
+  * True if recent messages show new query executions or results
+  * False if stuck, repeating, or getting errors
+
+- Who should speak next? (select from: {names})
+  * If request is satisfied, you can select any agent (the workflow will end anyway)
+  * Otherwise select the agent best suited to continue the work
+
+- What instruction or question would you give this team member?
+  * If request is satisfied, say "Task complete - no further action needed"
+  * Otherwise provide specific next steps
+
+Please output an answer in pure JSON format according to the following schema. The JSON object must be parsable as-is.
+DO NOT OUTPUT ANYTHING OTHER THAN JSON, AND DO NOT DEVIATE FROM THIS SCHEMA:
+
+{{
+    "is_request_satisfied": {{
+        "reason": string,
+        "answer": boolean
+    }},
+    "is_in_loop": {{
+        "reason": string,
+        "answer": boolean
+    }},
+    "is_progress_being_made": {{
+        "reason": string,
+        "answer": boolean
+    }},
+    "next_speaker": {{
+        "reason": string,
+        "answer": string (select from: {names})
+    }},
+    "instruction_or_question": {{
+        "reason": string,
+        "answer": string
+    }}
+}}"""
+            
             self.magentic_workflow = (
                 MagenticBuilder()
                 .participants(IntuneExpert=self.intune_expert_agent)
                 .with_standard_manager(
                     chat_client=self.chat_client,
-                    max_round_count=30,  # Reduced from 50 - prevents excessive looping (device-timeline has 8 steps)
+                    max_round_count=30,  # Reduced from 50 - prevents excessive looping (device-timeline has 4 steps)
                     max_stall_count=3,   # Reduced from 5 - fail faster if stuck
-                )
-                .on_event(
-                    self._magentic_event_callback,
-                    mode=MagenticCallbackMode.NON_STREAMING  # Enable delta events for task ledger updates
+                    progress_ledger_prompt=custom_progress_prompt,  # Custom prompt that checks for [SCENARIO_COMPLETE]
                 )
                 .build()
             )
@@ -1235,48 +1490,132 @@ EXAMPLE WORKFLOW:
                 device_timeline_guidance = (
                     "\nSpecial Instructions for Device Timeline:\n"
                     "You are an Intune diagnostics expert. Build a chronological device event timeline covering compliance status changes, policy assignment or evaluation outcomes, application install attempts (success/failure), device check-ins (including failures or long gaps), enrollment/sync events, and notable error events for the specified device and time window.\n"
-                    "IMPORTANT: This scenario contains 8 Kusto queries. Ensure you run all queries in this scenario.\n"
+                    "IMPORTANT: This scenario contains 4 steps. Ensure you complete all steps in this scenario.\n"
                     "1. Discover and aggregate relevant events via available tools / queries.\n"
                     "2. Normalize timestamps to UTC ISO8601 (YYYY-MM-DD HH:MM).\n"
                     "3. Group logically similar rapid events but keep important state transitions explicit.\n"
                     "4. Output a concise narrative summary first (outside code fence).\n"
-                    "5. Then output EXACTLY ONE fenced mermaid code block using the 'timeline' syntax:\n"
+                    "5. Then output EXACTLY ONE fenced mermaid code block using the simple timeline syntax (NOT gantt):\n"
                     "```mermaid\n"
-                    "gantt\n"
                     f"Title: Device Timeline ({device_id})\n"
-                    "Start: <earliest timestamp>\n"
+                    f"Start: <earliest timestamp in YYYY-MM-DD HH:MM format>\n"
+                    "<YYYY-MM-DD HH:MM>: <Category> - <Brief description>\n"
                     "<YYYY-MM-DD HH:MM>: <Category> - <Brief description>\n"
                     "...\n"
                     "```\n"
                     "Rules:\n"
+                    "- Use the simple timeline format shown above - do NOT use gantt syntax, sections, or milestones.\n"
+                    "- Each event line format: timestamp: Category - Description\n"
                     "- Do not include any other fenced mermaid blocks.\n"
                     "- Categories: Compliance, Policy, App, Check-in, Error, Enrollment, Other.\n"
                     "- If no events found, still return an empty timeline code block with a 'No significant events' note.\n"
                     f"Parameters: device_id={device_id}, start_time={start_time}, end_time={end_time}. Return the narrative summary first, then the mermaid block.\n"
                 )
 
-            # SIMPLIFIED query message - clear and direct
-            base_query_message = f"""Execute the '{query_type}' scenario with these parameters:
+            # EXPLICIT query message - prevents orchestrator loop
+            base_query_message = f"""Execute the COMPLETE '{query_type}' scenario with these parameters:
 {placeholder_str}
 
-Steps:
-1. search_scenarios(query="{normalized_query_type}")
-2. get_scenario(slug) from the results
-3. Execute each step sequentially
-4. Return formatted results
+CRITICAL WORKFLOW (Execute Once, Do NOT Restart):
+1. Call search_scenarios(query="{normalized_query_type}") ONCE at the beginning
+2. Call get_scenario(slug) ONCE to get scenario details
+3. Execute ALL scenario steps sequentially (step 1, 2, 3, 4, etc. until complete)
+   - Data Warehouse steps: Call find_device_by_id() or query_entity() as appropriate
+   - Kusto steps: Call substitute_and_get_query() then execute_query() - BOTH required
+   - Continue through ALL steps without stopping
+4. After executing the FINAL step, format results and output **[SCENARIO_COMPLETE]** marker
 
-Do not restart or loop."""
+EXECUTION RULES:
+- search_scenarios is ONLY called ONCE at the start - never call it again
+- get_scenario is ONLY called ONCE after search_scenarios - never call it again
+- Each Kusto step needs substitute_and_get_query AND execute_query - both are required
+- substitute_and_get_query only RETRIEVES the query text - it does NOT execute anything
+- execute_query is the ONLY tool that actually runs the query and returns data
+- A step is NOT complete until execute_query returns results
+- Execute ALL scenario steps in one continuous sequence - do NOT restart the scenario
+- After the LAST execute_query call completes, you MUST output **[SCENARIO_COMPLETE]** marker
+
+⚠️ SCENARIO COMPLETION SIGNAL (MANDATORY) ⚠️
+After you execute the LAST step and format the results, you MUST end your response with:
+
+**[SCENARIO_COMPLETE]**
+
+This marker tells the orchestrator to stop. Without it, the orchestrator will keep looping.
+The marker must appear on its own line at the very end of your response.
+
+Do NOT say "I will now execute" - just execute by calling the tools.
+Actions speak louder than words - call the tools, don't announce them."""
             query_message = base_query_message + device_timeline_guidance
             
             # Run the Magentic workflow with streaming
             logger.info(f"[Magentic] Running workflow for {query_type}")
             response_content = ""
             tables = []
+            scenario_complete = False  # Track completion marker
+            
+            # Import event types for proper type checking
+            from agent_framework._workflows._magentic import (
+                MagenticOrchestratorMessageEvent,
+                MagenticAgentDeltaEvent,
+                MagenticAgentMessageEvent,
+                MagenticFinalResultEvent,
+            )
             
             async for event in self.magentic_workflow.run_stream(query_message):
+                # Log orchestrator messages (task, ledger, instructions, notices)
+                if isinstance(event, MagenticOrchestratorMessageEvent):
+                    message = getattr(event, 'message', None)
+                    kind = getattr(event, 'kind', 'unknown')
+                    if message:
+                        message_text = getattr(message, 'text', '')
+                        truncated = message_text[:300] + "..." if len(message_text) > 300 else message_text
+                        logger.info(f"[Magentic-Orchestrator] [{kind}] {truncated}")
+                
+                # Log agent streaming deltas
+                elif isinstance(event, MagenticAgentDeltaEvent):
+                    agent_id = getattr(event, 'agent_id', 'agent')
+                    text = getattr(event, 'text', '')
+                    fn_call_name = getattr(event, 'function_call_name', None)
+                    
+                    if fn_call_name:
+                        logger.info(f"[Magentic-Agent-{agent_id}] Function call: {fn_call_name}")
+                    elif text:
+                        # Only log first 100 chars of streaming text to avoid spam
+                        logger.debug(f"[Magentic-Agent-{agent_id}] {text[:100]}")
+                
+                # Log complete agent messages AND check for completion marker
+                elif isinstance(event, MagenticAgentMessageEvent):
+                    agent_id = getattr(event, 'agent_id', 'agent')
+                    message = getattr(event, 'message', None)
+                    if message:
+                        message_text = getattr(message, 'text', '')
+                        truncated = message_text[:300] + "..." if len(message_text) > 300 else message_text
+                        logger.info(f"[Magentic-Agent-{agent_id}] Complete: {truncated}")
+                        
+                        # Check for completion marker in agent messages
+                        if "[SCENARIO_COMPLETE]" in message_text:
+                            scenario_complete = True
+                            response_content = message_text
+                            logger.info("[Magentic] ✅ SCENARIO_COMPLETE marker detected in agent message - scenario finished successfully")
+                            break  # Exit loop immediately - scenario is done
+                
+                # Log final result
+                elif isinstance(event, MagenticFinalResultEvent):
+                    message = getattr(event, 'message', None)
+                    if message:
+                        message_text = getattr(message, 'text', '')
+                        logger.info(f"[Magentic-Final] Task completed")
+                        
+                        # Also check completion marker in final result
+                        if "[SCENARIO_COMPLETE]" in message_text:
+                            scenario_complete = True
+                            response_content = message_text
+                            logger.info("[Magentic] ✅ SCENARIO_COMPLETE marker detected in final result")
+                            break
+                
                 # Capture the final output
                 if isinstance(event, WorkflowOutputEvent):
-                    logger.info("[Magentic] Received WorkflowOutputEvent - task completed")
+                    logger.info("[Magentic] Received WorkflowOutputEvent - extracting response")
                     data = getattr(event, 'data', None)
                     extracted_text = ""
                     try:
@@ -1302,6 +1641,17 @@ Do not restart or loop."""
                         logger.warning(f"Failed to extract text from workflow output: {extract_err}")
                         extracted_text = str(data) if data else ""
                     response_content = extracted_text
+                    
+                    # Check for SCENARIO_COMPLETE marker in workflow output
+                    if "[SCENARIO_COMPLETE]" in extracted_text:
+                        scenario_complete = True
+                        logger.info("[Magentic] ✅ SCENARIO_COMPLETE marker detected in workflow output - scenario finished successfully")
+                        break  # Exit loop immediately - scenario is done
+            
+            if scenario_complete:
+                logger.info("[Magentic] Scenario completed successfully with completion marker")
+            else:
+                logger.warning("[Magentic] ⚠️ Workflow ended without SCENARIO_COMPLETE marker - may be incomplete")
             
             # Extract tables from buffer (populated by event callback)
             if TOOL_RESULTS_BUFFER:
