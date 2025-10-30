@@ -1714,16 +1714,16 @@ Actions speak louder than words - call the tools, don't announce them."""
             }
 
     async def chat(self, message: str, extra_parameters: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Natural language chat interface using Magentic workflow orchestration
+        """Natural language chat interface using direct agent execution (no orchestration)
         
-        This maintains full compatibility with the Autogen implementation's
-        chat interface while using Agent Framework's Magentic orchestration.
+        This uses ChatAgent.run() directly without the Magentic orchestrator,
+        providing faster single-turn responses while maintaining all tool access.
         """
-        if not self.magentic_workflow:
-            raise Exception("Magentic workflow not initialized")
+        if not self.intune_expert_agent:
+            raise Exception("Agent not initialized")
         
         try:
-            logger.info(f"Processing chat message through Magentic orchestration: {message[:100]}...")
+            logger.info(f"Processing chat message through direct agent execution: {message[:100]}...")
 
             # Incorporate prior conversation history
             history = []
@@ -1758,21 +1758,7 @@ STRICT RESPONSE CONSTRAINTS:
 - Only report data that comes from successful query results
 - If a query fails, report the error and ask for guidance
 - Use lookup_context to get stored values for placeholders in queries
-
-TASK COMPLETION CRITERIA:
-The task is COMPLETE when ALL of the following are satisfied:
-1. All required queries have been executed successfully
-2. Query results have been formatted and presented to the user
-3. A summary or analysis has been provided based on the results
-The task is NOT complete if queries are executed but no response is given to the user.
-""" if strict_mode else """
-TASK COMPLETION CRITERIA:
-The task is COMPLETE when:
-1. All necessary information has been gathered
-2. Results have been formatted and presented to the user
-3. A clear response addressing the user's request has been provided
-The task is NOT complete until a user-facing response is given.
-"""
+""" if strict_mode else ""
                 composite_task = (
                     ("The following is the prior conversation (most recent last). Use it to maintain context such as referenced device IDs or other identifiers.\n" + "\n".join(history_lines) + "\n\n")
                     + (guardrail)
@@ -1786,144 +1772,56 @@ The task is NOT complete until a user-facing response is given.
                         "- EXECUTE the queries returned by lookup_scenarios - do not skip execution\n"
                         "- Use lookup_context to get stored values if queries have placeholders\n"
                         "- Only return factual data from query results, no speculation\n\n"
-                        f"User message: {message}\n\n"
-                        "TASK COMPLETION CRITERIA:\n"
-                        "The task is COMPLETE when ALL of the following are satisfied:\n"
-                        "1. All required queries have been executed successfully\n"
-                        "2. Query results have been formatted and presented to the user\n"
-                        "3. A summary or analysis has been provided based on the results\n"
-                        "The task is NOT complete if queries are executed but no response is given to the user."
+                        f"User message: {message}"
                     )
                 else:
-                    composite_task = (
-                        f"{message}\n\n"
-                        "TASK COMPLETION CRITERIA:\n"
-                        "The task is COMPLETE when:\n"
-                        "1. All necessary information has been gathered (queries executed if needed)\n"
-                        "2. Results have been formatted and presented to the user\n"
-                        "3. A clear response addressing the user's request has been provided\n"
-                        "The task is NOT complete until a user-facing response is given."
-                    )
+                    composite_task = message
 
-            # Run the Magentic workflow with streaming
-            logger.info(f"[Magentic] Running workflow with message: {composite_task[:100]}...")
-            response_content = ""
+            # Run the agent directly (no orchestrator)
+            logger.info(f"[DirectAgent] Running agent with message: {composite_task[:100]}...")
             TOOL_RESULTS_BUFFER.clear()
+            
+            # Direct agent execution - returns AgentRunResponse
+            response = await self.intune_expert_agent.run(composite_task)
+            
+            # Extract response text
+            response_content = response.text if hasattr(response, 'text') else str(response)
+            logger.info(f"[DirectAgent] Got response: {len(response_content)} characters")
+            
+            # Extract tables from function results in response messages
             extracted_objs = []
+            try:
+                from agent_framework._types import FunctionResultContent
+            except ImportError:
+                from agent_framework import FunctionResultContent
             
-            async for event in self.magentic_workflow.run_stream(composite_task):
-                # Log orchestrator and agent events for debugging
-                if hasattr(event, '__class__'):
-                    event_type = event.__class__.__name__
-                    logger.info(f"[Magentic] Received event: {event_type}")
-                    
-                    # Log message content for debugging the conversation
-                    if hasattr(event, 'message'):
-                        msg = getattr(event, 'message', None)
-                        if msg:
-                            # Log sender if available
-                            sender = getattr(msg, 'sender', 'unknown')
-                            role = getattr(msg, 'role', 'unknown')
-                            
-                            # Extract text content
-                            msg_text = ""
-                            if hasattr(msg, 'text') and msg.text:
-                                msg_text = msg.text
-                            elif hasattr(msg, 'contents') and msg.contents:
-                                contents = msg.contents
-                                text_parts = []
-                                for c in contents:
-                                    if hasattr(c, 'text') and c.text:
-                                        text_parts.append(str(c.text))
-                                    elif hasattr(c, '__class__'):
-                                        # Log non-text content types (like function calls/results)
-                                        content_type = c.__class__.__name__
-                                        if 'function' in content_type.lower() or 'tool' in content_type.lower():
-                                            logger.info(f"[Magentic] {event_type} contains {content_type}")
-                                msg_text = " ".join(text_parts) if text_parts else ""
-                            
-                            # Log the message with truncation for long messages
-                            if msg_text:
-                                truncated = msg_text[:500] + "..." if len(msg_text) > 500 else msg_text
-                                logger.info(f"[Magentic] {event_type} from {sender} ({role}): {truncated}")
-                            else:
-                                logger.info(f"[Magentic] {event_type} from {sender} ({role}): <no text content>")
-                
-                # Capture the final output
-                if isinstance(event, WorkflowOutputEvent):
-                    logger.info("[Magentic] Received WorkflowOutputEvent - task completed")
-                    # Robust extraction of textual content from Agent Framework objects
-                    data = getattr(event, 'data', None)
-                    extracted_text = ""
-                    try:
-                        if data is None:
-                            extracted_text = ""
-                        elif hasattr(data, 'text') and data.text:
-                            extracted_text = data.text  # ChatResponse or ChatMessage.text
-                        elif hasattr(data, 'content') and data.content:
-                            extracted_text = str(data.content)
-                        elif hasattr(data, 'contents') and data.contents:
-                            contents = data.contents
-                            try:
-                                extracted_text = " ".join(
-                                    c.text for c in contents if hasattr(c, 'text') and c.text
-                                )
-                            except Exception:  # noqa: BLE001
-                                extracted_text = ""
-                            if not extracted_text:
-                                extracted_text = str(data)
-                        else:
-                            extracted_text = str(data)
-                    except Exception as extract_err:  # noqa: BLE001
-                        logger.warning(f"[Magentic] Failed to extract text from workflow output: {extract_err}")
-                        extracted_text = str(data) if data else ""
-                    response_content = extracted_text
-                
-                # Extract tables from function result events
-                if hasattr(event, 'message'):
-                    event_message = getattr(event, 'message', None)
-                    if event_message and hasattr(event_message, 'contents'):
-                        logger.debug(f"[Magentic] Event message has {len(event_message.contents)} content items (chat phase)")
-                        try:
-                            from agent_framework._types import FunctionResultContent
-                        except ImportError:
-                            from agent_framework import FunctionResultContent
-                        
-                        for content in event_message.contents:
-                            try:
-                                if isinstance(content, FunctionResultContent) or hasattr(content, 'result'):
-                                    if hasattr(content, 'result') and content.result:
-                                        result_data = content.result
-                                        logger.debug(f"[Magentic] FunctionResultContent detected (type={type(result_data)})")
-                                        if isinstance(result_data, dict):
-                                            extracted_objs.append(result_data)
-                                        elif isinstance(result_data, str):
-                                            try:
-                                                parsed = json.loads(result_data)
-                                                if isinstance(parsed, dict):
-                                                    extracted_objs.append(parsed)
-                                            except json.JSONDecodeError:
-                                                multi = self._extract_json_objects(result_data)
-                                                if multi:
-                                                    extracted_objs.extend(obj for obj in multi if isinstance(obj, dict))
-                                text_val = getattr(content, 'text', None)
-                                if text_val:
-                                    logger.debug(f"[Magentic] Text content candidate length={len(text_val)} (chat phase)")
-                                    if ('{' in text_val and '}' in text_val) or ('[' in text_val and ']' in text_val):
-                                        objs = self._extract_json_objects(text_val)
-                                        if objs:
-                                            logger.debug(f"[Magentic] Extracted {len(objs)} JSON object(s) from text content")
-                                            extracted_objs.extend(obj for obj in objs if isinstance(obj, dict))
-                            except Exception as content_err:  # noqa: BLE001
-                                logger.debug(f"[Magentic] Content parsing error (chat): {content_err}")
+            # Check response messages for function results
+            if hasattr(response, 'messages'):
+                for msg in response.messages:
+                    if hasattr(msg, 'contents'):
+                        for content in msg.contents:
+                            if isinstance(content, FunctionResultContent) and hasattr(content, 'result'):
+                                result_data = content.result
+                                logger.debug(f"[DirectAgent] FunctionResultContent detected (type={type(result_data)})")
+                                if isinstance(result_data, dict):
+                                    extracted_objs.append(result_data)
+                                elif isinstance(result_data, str):
+                                    try:
+                                        parsed = json.loads(result_data)
+                                        if isinstance(parsed, dict):
+                                            extracted_objs.append(parsed)
+                                    except json.JSONDecodeError:
+                                        multi = self._extract_json_objects(result_data)
+                                        if multi:
+                                            extracted_objs.extend(obj for obj in multi if isinstance(obj, dict))
             
-            logger.info(f"[Magentic] Extracted {len(extracted_objs)} objects from function results")
+            logger.info(f"[DirectAgent] Extracted {len(extracted_objs)} objects from function results")
             
             # If no objects from function results, try extracting from text response (fallback)
             if not extracted_objs:
-                logger.info("[Magentic] No function results found, trying to extract from response text")
+                logger.info("[DirectAgent] No function results found, trying to extract from response text")
                 extracted_objs = self._extract_json_objects(response_content)
-                logger.info(f"[Magentic] Extracted {len(extracted_objs)} JSON objects from response text")
+                logger.info(f"[DirectAgent] Extracted {len(extracted_objs)} JSON objects from response text")
             
             tables_all = self._normalize_table_objects(extracted_objs)
             unique_tables = self._dedupe_tables(tables_all)
@@ -1941,13 +1839,13 @@ The task is NOT complete until a user-facing response is given.
                         })
                 if buffered_tables:
                     unique_tables = self._dedupe_tables(buffered_tables)
-                    logger.info(f"[Magentic] Chat fallback buffer recovered {len(unique_tables)} table(s)")
+                    logger.info(f"[DirectAgent] Chat fallback buffer recovered {len(unique_tables)} table(s)")
                 TOOL_RESULTS_BUFFER.clear()
             
             if unique_tables:
-                logger.info(f"[Magentic] Found {len(unique_tables)} unique tables")
+                logger.info(f"[DirectAgent] Found {len(unique_tables)} unique tables")
             else:
-                logger.warning("[Magentic] No tables found - check if Kusto tool is being called")
+                logger.warning("[DirectAgent] No tables found - check if Kusto tool is being called")
 
             # Clean the response by removing raw JSON objects (they're already in tables)
             # This prevents the AI summary from showing garbled table data
@@ -1956,13 +1854,13 @@ The task is NOT complete until a user-facing response is given.
             return {
                 "message": message,
                 "response": self._apply_speculation_filter(clean_response, unique_tables if unique_tables else None, strict_mode),
-                "agent_used": "AgentFramework (Magentic)",
+                "agent_used": "AgentFramework (Direct)",
                 "tables": unique_tables if unique_tables else None,
                 "state": {"history_turns": len(history), "strict": strict_mode} if (history or strict_mode) else None,
             }
 
         except Exception as e:
-            logger.error(f"Magentic orchestration processing failed: {e}")
+            logger.error(f"Direct agent execution failed: {e}")
             return await self._fallback_intent_detection(message, extra_parameters)
     
     async def _fallback_intent_detection(self, message: str, extra_parameters: dict[str, Any] | None = None) -> dict[str, Any]:
