@@ -388,7 +388,7 @@ def create_datawarehouse_mcp_tool_function(tool_name: str, tool_description: str
             **kwargs: Tool-specific parameters
             
         Returns:
-            Result from the Data Warehouse MCP tool execution
+            Result from the Data Warehouse MCP tool execution in table-compatible format
         """
         try:
             from services.datawarehouse_mcp_service import get_datawarehouse_service
@@ -420,6 +420,38 @@ def create_datawarehouse_mcp_tool_function(tool_name: str, tool_description: str
                                 logger.info(f"[AgentFramework] Data Warehouse MCP tool '{tool_name}' returned: {result_text}")
                             else:
                                 logger.info(f"[AgentFramework] Data Warehouse MCP tool '{tool_name}' returned {len(result_text)} chars: {result_text[:500]}...")
+                            
+                            # Convert OData format to table-compatible format for UI rendering
+                            try:
+                                parsed = json.loads(result_text)
+                                if isinstance(parsed, dict):
+                                    # Check for OData value array format
+                                    if "value" in parsed and isinstance(parsed["value"], list):
+                                        # Convert to table format with "data" key
+                                        entity_name = actual_args.get("entity", tool_name)
+                                        table_result = {
+                                            "success": True,
+                                            "name": f"Data Warehouse: {entity_name}",
+                                            "data": parsed["value"],  # List of records for table rendering
+                                            "total_count": len(parsed["value"])
+                                        }
+                                        return json.dumps(table_result, indent=2)
+                                    # Check if it's already a success wrapper
+                                    elif "success" in parsed and "data" in parsed:
+                                        # Unwrap nested data if it has OData format
+                                        data = parsed.get("data", {})
+                                        if isinstance(data, dict) and "value" in data:
+                                            entity_name = actual_args.get("entity", tool_name)
+                                            table_result = {
+                                                "success": True,
+                                                "name": f"Data Warehouse: {entity_name}",
+                                                "data": data["value"],
+                                                "total_count": len(data["value"])
+                                            }
+                                            return json.dumps(table_result, indent=2)
+                            except json.JSONDecodeError:
+                                pass  # Return original text if not valid JSON
+                            
                             return result_text
                         else:
                             return json.dumps({"content": str(text_content)})
@@ -760,30 +792,56 @@ class AgentFrameworkService:
                         max_results: Maximum devices to search (default: 100)
                         
                     Returns:
-                        JSON string with device data if found, or error if not found
+                        JSON string with device data in table format for UI rendering
                     """
                     try:
                         result = await datawarehouse_service.find_device_by_id(device_id, max_results)
                         
                         if result.get("success") and result.get("data", {}).get("found"):
                             device = result["data"]["device"]
+                            device_name = device.get('deviceName', 'Unknown')
+                            
+                            # Return in table-compatible format that _normalize_table_objects can process
+                            # Using the "data" format with list of records (see from_data_rows handler)
                             return json.dumps({
                                 "success": True,
-                                "device": device,
-                                "message": f"Found device: {device.get('deviceName', 'Unknown')}"
+                                "name": "Device Details (Data Warehouse)",
+                                "data": [device],  # List of device records for table rendering
+                                "message": f"Found device: {device_name}"
                             }, indent=2)
                         elif result.get("success"):
                             searched = result.get("data", {}).get("searched", 0)
+                            # Return error in table format for consistent UI display
                             return json.dumps({
                                 "success": False,
-                                "error": f"Device {device_id} not found in first {searched} devices",
-                                "suggestion": "Try increasing max_results or verify device ID is correct"
+                                "name": "Device Search Result",
+                                "data": [{
+                                    "Result": "Not Found",
+                                    "DeviceId": device_id,
+                                    "DevicesSearched": searched,
+                                    "Suggestion": "Try increasing max_results or verify device ID"
+                                }],
+                                "error": f"Device {device_id} not found in first {searched} devices"
                             }, indent=2)
                         else:
-                            return json.dumps(result, indent=2)
+                            # Return API error in table format
+                            return json.dumps({
+                                "success": False,
+                                "name": "Data Warehouse Error",
+                                "data": [{
+                                    "Result": "Error",
+                                    "Message": result.get("error", "Unknown error")
+                                }],
+                                "error": result.get("error", "Unknown error")
+                            }, indent=2)
                     except Exception as e:
                         logger.error(f"find_device_by_id failed: {e}")
-                        return json.dumps({"success": False, "error": str(e)})
+                        return json.dumps({
+                            "success": False,
+                            "name": "Data Warehouse Error",
+                            "data": [{"Result": "Error", "Message": str(e)}],
+                            "error": str(e)
+                        })
                 
                 tools.append(find_device_by_id)
                 logger.info(f"Added Data Warehouse helper tool: find_device_by_id")
